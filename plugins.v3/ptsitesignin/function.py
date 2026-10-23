@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import re
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -21,7 +23,7 @@ def diagnostic_hint(value: Any) -> str:
         return ""
     stages = {"preflight": "预检", "navigation": "打开页面", "challenge_before": "验证前",
               "button": "等待按钮", "submit": "提交", "auto_submit": "自动提交",
-              "challenge_after": "提交后", "verify": "回读核验", "altcha": "Altcha",
+              "challenge_after": "点击/提交后", "verify": "回读核验", "altcha": "Altcha",
               "ocr_image": "验证码截图", "ocr_http": "OCR"}
     parts = []
     if value.get("stage") in stages:
@@ -34,10 +36,27 @@ def diagnostic_hint(value: Any) -> str:
         if isinstance(value.get("token"), bool):
             parts.append("验证结果=" + ("已取得" if value["token"] else "未取得"))
     for key, label in (("frames", "验证框"), ("checkbox_clicks", "点击验证框"),
-                       ("requests", "提交请求"), ("http_status", "页面HTTP")):
+                       ("widgets_visible", "可见验证组件"), ("waf_clicks", "点击雷池确认"),
+                       ("requests", "签到POST数"), ("http_status", "页面HTTP")):
         number = value.get(key)
         if type(number) is int and 0 <= number <= 999:
             parts.append(f"{label}={number}")
+    for key, label, choices in (
+        ("frame_action", "验证框操作", {"clicked": "已点击", "not_visible": "不可见",
+                                      "missing_element": "未取得元素", "error": "异常"}),
+        ("challenge_script", "验证脚本", {"loading": "加载中", "loaded": "已响应", "failed": "加载失败"}),
+    ):
+        if isinstance(value.get(key), str) and value[key] in choices:
+            parts.append(label + "=" + choices[value[key]])
+    resource_error = value.get("resource_error")
+    if isinstance(resource_error, str) and re.fullmatch(r"ERR_[A-Z_]{1,64}|HTTP_[45]\d\d|NETWORK_ERROR", resource_error):
+        parts.append("验证资源错误=" + resource_error)
+    if value.get("visibility") in {"visible", "hidden"}:
+        parts.append("页面=" + ("前台" if value["visibility"] == "visible" else "后台"))
+    if isinstance(value.get("focused"), bool):
+        parts.append("页面焦点=" + ("有" if value["focused"] else "无"))
+    if value.get("click_error") in {"Error", "TypeError", "TimeoutError", "ProtocolError", "TargetCloseError"}:
+        parts.append("验证点击异常=" + value["click_error"])
     if value.get("auto_action") in {"callback", "form"}:
         parts.append("提交方式=" + value["auto_action"])
     if value.get("error_type") in {"Error", "TypeError", "ReferenceError", "SyntaxError",
@@ -142,7 +161,9 @@ class FunctionSigner:
             # Do not retry an uncertain submission here: the site may already have accepted it.
             cause = error.reason if isinstance(error, urllib.error.URLError) else error
             kind = type(cause).__name__ if isinstance(cause, BaseException) else "URLError"
-            return SignResult("failed", f"自建浏览器连接中断或超时，签到结果未确认"
+            message = ("MoviePilot → 自建 Browserless 的TLS连接提前关闭，签到结果未确认"
+                       if isinstance(cause, ssl.SSLEOFError) else "自建浏览器连接中断或超时，签到结果未确认")
+            return SignResult("failed", message +
                               f"（异常={kind}；耗时={time.monotonic() - started:.1f}秒）", transient=True)
         except (ValueError, TypeError):
             return SignResult("failed", "自建浏览器配置无效或 Function 返回了无效 JSON")
@@ -162,9 +183,13 @@ class FunctionSigner:
             "timeout": "自建浏览器等待超时，签到结果未确认",
             "execution": "自建浏览器执行失败，签到结果未确认",
         }
-        hint = diagnostic_hint(result.get("diagnostics"))
+        diagnostics = result.get("diagnostics")
+        hint = diagnostic_hint(diagnostics)
         suffix = "；" + hint if hint else ""
         if result.get("error"):
+            if (result.get("error") == "challenge" and isinstance(diagnostics, Mapping)
+                    and diagnostics.get("challenge_script") == "failed"):
+                return SignResult("failed", "验证脚本加载失败，尚未完成验证，请检查浏览器出口到验证服务的连接" + suffix)
             return SignResult("failed", errors.get(str(result["error"]), errors["execution"]) + suffix)
         html = str(result.get("after") or "")
         if cloudflare_pending(html) or result.get("challenge_pending"):

@@ -31,7 +31,7 @@ OCR 使用 [jxxghp/MoviePilot-OCR](https://github.com/jxxghp/MoviePilot-OCR) 的
 | mode | 行为 |
 | --- | --- |
 | `open_page` | 打开页面，按选择器与文字点击，检查实际结果 |
-| `cloudflare` | 启用开源 Chromium 的 `launch.stealth`，等待 JS 验证；读取 open Shadow DOM 中的验证结果，对可见验证框有限次点击；自动签到先等待原生提交，再按站内回调或表单兜底 |
+| `cloudflare` | 启用开源 Chromium 的 `launch.stealth`，等待 JS 验证；激活远端页面并滚动到验证框后有限次点击；支持雷池 `Confirm` 确认按钮；自动签到先等待原生提交，再按站内回调或表单兜底 |
 | `image` | 截图图片验证码，调用自建 OCR，填入并提交 |
 | `trigger_image` | 先打开验证码弹窗，再截图、识别与提交 |
 | `altcha` | 点击 Altcha 控件，等验证载荷生成后提交 |
@@ -41,6 +41,8 @@ OCR 使用 [jxxghp/MoviePilot-OCR](https://github.com/jxxghp/MoviePilot-OCR) 的
 `preflight_path` 会先在同一会话检查已签到状态；`submit_method: ajax` 会提交真实表单并读取接口回执，包括文本回执。自动提交仅在取得验证结果、且尚未观察到提交请求时兜底；已调用回调或发出请求后不会补发第二次 POST。表单兜底仅允许同源目标。
 
 观众的验证等待预算由 15 秒调整为 60 秒。建议将浏览器任务总超时设为 180 秒；各阶段共用总预算，超时前尽量返回诊断。失败原因会附加阶段、耗时、页面 HTTP 状态、验证结果是否取得、验证框点击次数和提交请求数，不输出实际验证码 token 或 Cookie。页面脚本中残留的 WAF 字样、猪猪导航里的“两步验证”链接不再单独作为失败依据。
+
+导航和等待验证前会调用 `page.bringToFront()`，激活 Browserless 服务器中的站点标签页；不启动 MoviePilot 本机浏览器。日志记录页面可见性、焦点、验证框点击异常及验证资源加载结果。Turnstile 脚本加载超时会明确报告资源错误；MoviePilot 调用 Browserless 时的 TLS 提前断开单独报告，避免将网络故障统称为验证失败。连接异常后仍不自动重放签到请求。
 
 若自建实例需要关闭 stealth，可在 Browserless 地址的 `launch` 查询参数中明确设置 `{"stealth":false}`；插件保留显式配置。stealth 是浏览器启动选项，不包含 Cloud 的付费求解器。
 

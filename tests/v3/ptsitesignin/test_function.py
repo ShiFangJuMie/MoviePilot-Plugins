@@ -1,5 +1,6 @@
 """Contracts at the self-hosted HTTP transport and site-module boundaries."""
 import json
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -87,15 +88,17 @@ def test_click_and_challenge_pages_are_not_success_receipts():
 
 
 def test_transport_failure_is_not_replayed_and_never_exposes_token():
-    opener = Mock()
-    opener.open.side_effect = TimeoutError("transport fixture")
-    signer = FunctionSigner("https://private.example", "private-fixture-token")
-    with patch("urllib.request.build_opener", return_value=opener):
-        result = signer.sign(SITE, {"path": "/attendance.php"})
-    assert result.status == "failed" and result.transient
-    assert opener.open.call_count == 1
-    assert "private-fixture-token" not in result.message
-    assert "TimeoutError" in result.message
+    for error in [TimeoutError("transport fixture"),
+                  urllib.error.URLError(ssl.SSLEOFError("private-fixture-token"))]:
+        opener = Mock()
+        opener.open.side_effect = error
+        signer = FunctionSigner("https://private.example", "private-fixture-token")
+        with patch("urllib.request.build_opener", return_value=opener):
+            result = signer.sign(SITE, {"path": "/attendance.php"})
+        assert result.status == "failed" and result.transient
+        assert opener.open.call_count == 1
+        assert "private-fixture-token" not in result.message
+        assert ("TimeoutError" if isinstance(error, TimeoutError) else "TLS连接提前关闭") in result.message
 
 
 def test_http_challenge_on_403_or_503_can_reach_function_fallback():
@@ -231,12 +234,21 @@ def test_browser_failure_contains_bounded_diagnostics_without_page_secrets():
     signer = FunctionSigner("https://private.example", "fixture")
     result = {"error": "execution", "diagnostics": {"stage": "challenge_before", "kind": "turnstile",
               "elapsed_ms": 31000, "frames": 1, "token": False, "checkbox_clicks": 3,
+              "waf_clicks": 1, "frame_action": "not_visible", "challenge_script": "failed",
+              "resource_error": "ERR_TIMED_OUT", "click_error": "TypeError", "visibility": "hidden", "focused": False,
               "error_type": "TypeError", "raw": "private-fixture-token"}}
     with patch.object(signer, "_request", return_value=result):
         outcome = signer.sign(SITE, {"path": "/attendance.php"})
     assert outcome.status == "failed"
     assert "TypeError" in outcome.message and "31.0" in outcome.message
+    assert "验证框操作=不可见" in outcome.message and "验证脚本=加载失败" in outcome.message
+    assert "ERR_TIMED_OUT" in outcome.message and "点击雷池确认=1" in outcome.message
+    assert "页面=后台" in outcome.message and "页面焦点=无" in outcome.message
     assert "private-fixture-token" not in outcome.message
+    result["error"] = "challenge"
+    with patch.object(signer, "_request", return_value=result):
+        outcome = signer.sign(SITE, {"path": "/attendance.php"})
+    assert outcome.message.startswith("验证脚本加载失败") and "ERR_TIMED_OUT" in outcome.message
 
 
 def test_cloudflare_launch_uses_stealth_without_overwriting_explicit_options():

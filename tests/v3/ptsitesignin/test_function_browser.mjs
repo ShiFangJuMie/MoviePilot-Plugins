@@ -84,6 +84,18 @@ const pt = http.createServer(async (req, res) => {
       res.end(`<script>window.loadedLibrary='雷池 WAF';</script><form id="form"><button id="submit">立即签到</button></form><script>const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};</script>`);
     } else if (req.url === '/blocked') {
       res.statusCode=403; res.end('<title>Just a moment...</title><body>Checking your browser</body>');
+    } else if (['/waf', '/waf-cn', '/waf-post'].includes(req.url)) {
+      const chinese = req.url === '/waf-cn';
+      const next = req.url === '/waf-post' ? '/waf-finish' : '/plain';
+      res.statusCode = 468;
+      res.end(`<p>${chinese ? '正在进行安全检测；安全检测能力由雷池 WAF 提供' : 'Security Detection Powered By SafeLine WAF'}</p>
+        <button id="sl-check" onclick="this.disabled=true;location.href='${next}'">${chinese ? '确认' : 'Confirm'}</button>`);
+    } else if (req.url === '/waf-after') {
+      res.end('<a id="submit" href="/waf-post">立即签到</a>');
+    } else if (req.url === '/waf-finish') {
+      signs += 1; signed = true; res.end('签到成功');
+    } else if (req.url === '/cf-script-failed') {
+      res.end('<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async></script><div class="cf-turnstile"></div><input name="cf-turnstile-response" type="hidden">');
     } else if (req.url === '/auto-callback') {
       res.end(`<form action="/sign" method="POST"><input name="cf-turnstile-response" type="hidden" value="fixture-proof"></form><div data-callback="onVerified"></div><p>验证通过后将自动完成签到</p><script>
         window.onVerified=()=>setTimeout(()=>fetch('/sign',{method:'POST',body:new FormData(document.querySelector('form'))}).then(r=>r.json()).then(()=>document.body.textContent='签到成功'),300);</script>`);
@@ -94,8 +106,12 @@ const pt = http.createServer(async (req, res) => {
       res.statusCode=303; res.setHeader('Location','/signed'); res.end();
     } else if (req.url === '/verify-delayed') {
       res.end(`<body>正在加载…<script>setTimeout(()=>document.body.textContent='${signed ? '今日已签到' : '未签到'}',400)</script></body>`);
-    } else if (req.url === '/cf-frame') {
-      res.end(`<iframe title="verification" src="https://challenges.cloudflare.com/mock" width="300" height="70" style="border:0"></iframe>
+    } else if (['/cf-frame', '/cf-frame-offscreen', '/cf-frame-closed-host'].includes(req.url)) {
+      const frame = '<iframe title="verification" src="https://challenges.cloudflare.com/mock" width="300" height="70" style="border:0"></iframe>';
+      const widget = req.url === '/cf-frame-closed-host'
+        ? `<div id="widget" class="cf-turnstile"></div><script>document.getElementById('widget').attachShadow({mode:'closed'}).innerHTML=${JSON.stringify(frame)};</script>`
+        : frame;
+      res.end(`${req.url === '/cf-frame-offscreen' ? '<div style="height:1600px">站点横幅与导航</div>' : ''}${widget}
         <form id="form"><input type="hidden" name="cf-turnstile-response" id="proof"><button id="submit">立即签到</button></form><script>
         addEventListener('message',e=>{if(e.origin==='https://challenges.cloudflare.com' && e.data==='fixture-verified')document.getElementById('proof').value='fixture-proof';});
         const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};</script>`);
@@ -137,6 +153,8 @@ function handleAdapter(handle) {
   if (!handle) return null;
   return new Proxy(handle, { get(target, key) {
     if (key === 'asElement') return () => handleAdapter(target.asElement());
+    if (key === 'click') return ({ offset, ...options } = {}) =>
+      target.click({ ...options, ...(offset ? { position: offset } : {}) });
     if (key === 'screenshot') return async ({ encoding, ...options }) => {
       const image = await target.screenshot(options);
       return encoding === 'base64' ? image.toString('base64') : image;
@@ -145,8 +163,18 @@ function handleAdapter(handle) {
     return typeof value === 'function' ? value.bind(target) : value;
   } });
 }
+const frameAdapters = new WeakMap();
+function frameAdapter(frame) {
+  if (!frameAdapters.has(frame)) frameAdapters.set(frame, new Proxy(frame, { get(target, key) {
+    if (key === 'frameElement') return async () => handleAdapter(await target.frameElement());
+    const value = target[key];
+    return typeof value === 'function' ? value.bind(target) : value;
+  } }));
+  return frameAdapters.get(frame);
+}
 function pageAdapter(page) {
   return new Proxy(page, { get(target, key) {
+    if (key === 'frames') return () => target.frames().map(frameAdapter);
     if (key === 'browserContext') return () => ({ newPage: async () => pageAdapter(await target.context().newPage()) });
     if (key === 'setCookie') return (...cookies) => target.context().addCookies(cookies);
     if (key === 'evaluateOnNewDocument') return (fn) => target.addInitScript(fn);
@@ -170,6 +198,7 @@ try {
     const browserContext = await browser.newContext();
     await browserContext.route('**/*', (route) => {
       const url = new URL(route.request().url());
+      if (url.href === 'https://challenges.cloudflare.com/turnstile/v0/api.js') return route.abort('timedout');
       if (url.href === 'https://challenges.cloudflare.com/mock') {
         assert.equal(route.request().headers().cookie, undefined);
         return route.fulfill({contentType:'text/html',body:`<body style="margin:0"><div id="host"></div><script>
@@ -241,6 +270,20 @@ try {
     assert.equal(result.diagnostics.stage, 'challenge_before'); assert.equal(signs, 0);
     assert.equal(JSON.stringify(result.diagnostics).includes('session=fixture'), false);
   });
+  for (const name of ['waf', 'waf-cn', 'waf-after']) {
+    await scenario(name, {mode:'cloudflare',cloudflare_wait:1}, result => {
+      assert.match(result.after || '', /签到成功/); assert.equal(signs, 1);
+      assert.equal(result.diagnostics.waf_clicks, 1);
+    });
+  }
+  await scenario('cf-script-failed', {mode:'cloudflare',cloudflare_wait:0.5}, result => {
+    assert.equal(result.error, 'challenge'); assert.equal(signs, 0);
+    assert.equal(result.diagnostics.frames, 0);
+    assert.equal(result.diagnostics.challenge_script, 'failed');
+    assert.equal(result.diagnostics.resource_error, 'ERR_TIMED_OUT');
+    assert.equal(result.diagnostics.visibility, 'visible');
+    assert.equal(result.diagnostics.focused, true);
+  });
   await scenario('auto-callback', {mode:'cloudflare',submit_method:'auto',auto_wait:500,
     pending_keywords:['验证通过后将自动完成签到'],verify_success_path:'/signed'}, result => {
     assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1);
@@ -250,10 +293,13 @@ try {
   await scenario('ajax', {submit_method:'ajax',verify_success_path:'/verify-delayed',verify_wait:1000}, result => {
     assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1);
   });
-  await scenario('cf-frame', {mode:'cloudflare',cloudflare_wait:5}, result => {
-    assert.match(result.after || '', /签到成功/); assert.equal(signs, 1);
-    assert.equal(result.diagnostics.checkbox_clicks, 2);
-  });
+  for (const name of ['cf-frame', 'cf-frame-offscreen', 'cf-frame-closed-host']) {
+    // Include the full bounded retry window: first revealing an off-screen iframe may consume a click.
+    await scenario(name, {mode:'cloudflare',cloudflare_wait:8}, result => {
+      assert.match(result.after || '', /签到成功/); assert.equal(signs, 1);
+      assert.ok(result.diagnostics.checkbox_clicks >= 2 && result.diagnostics.checkbox_clicks <= 3);
+    });
+  }
   await scenario('slider', {}, (result) => { assert.equal(result.error, 'slider'); assert.equal(signs, 0); });
   await scenario('disabled', {}, (result) => { assert.equal(result.error, 'button'); assert.equal(signs, 0); });
   await scenario('already', {}, (result) => { assert.match(result.after, /今日已签到/); assert.equal(signs, 0); });

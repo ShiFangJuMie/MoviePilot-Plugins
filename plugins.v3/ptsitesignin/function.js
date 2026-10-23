@@ -17,6 +17,12 @@ export default async function ({ page, context }) {
   let lastState = {};
   let navigationStatus = 0;
   let checkboxClicks = 0;
+  let wafClicks = 0;
+  let wafClickedAt = 0;
+  let frameAction = 'none';
+  let clickError = '';
+  let challengeScript = 'none';
+  let resourceError = '';
   let autoAction = 'none';
   const posts = [];
   const receiptPaths = new Set([target.pathname]);
@@ -30,6 +36,10 @@ export default async function ({ page, context }) {
   const diagnostic = error => ({ stage, elapsed_ms: Date.now() - started,
     kind: lastState.kind || 'none', token: Boolean(lastState.token),
     frames: lastState.frames || 0, checkbox_clicks: checkboxClicks,
+    widgets_visible: lastState.widgets_visible || 0, waf_clicks: wafClicks,
+    frame_action: frameAction, click_error: clickError,
+    challenge_script: challengeScript, resource_error: resourceError,
+    visibility: lastState.visibility || 'unknown', focused: lastState.focused,
     requests: signPosts().length, http_status: navigationStatus, auto_action: autoAction,
     error_type: error?.name || '' });
   const failure = (error, exception) => ({ error, diagnostics: diagnostic(exception) });
@@ -67,6 +77,13 @@ export default async function ({ page, context }) {
   const challengeFrames = () => page.frames().filter(frame => {
     try { return new URL(frame.url()).hostname === 'challenges.cloudflare.com'; } catch { return false; }
   });
+  const verificationResource = request => {
+    try {
+      const host = new URL(request.url()).hostname;
+      return (host === 'challenges.cloudflare.com' || host === 'challenge.rivers.chaitin.cn') &&
+        ['script', 'document'].includes(request.resourceType());
+    } catch { return false; }
+  };
 
   async function state() {
     const current = await page.evaluate(statusWords => {
@@ -75,7 +92,7 @@ export default async function ({ page, context }) {
       const visible = document.title + '\n' + text;
       // Script names and a loaded challenge library are not proof that the page is still blocked.
       const interstitial = /just a moment|checking your browser|verify you are human|正在验证您是否是真人/i.test(visible);
-      const waf = /正在进行安全检测|安全检测能力由|雷池\s*WAF/i.test(visible);
+      const waf = /正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine\s*WAF/i.test(visible);
       let token = nodes('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]')
         .map(node => node.value).find(Boolean) || '';
       if (!token) { try { token = window.turnstile?.getResponse() || ''; } catch { /* not rendered yet */ } }
@@ -83,10 +100,15 @@ export default async function ({ page, context }) {
         .length > 0;
       const lower = text.toLowerCase();
       return {
+        visibility: document.visibilityState, focused: document.hasFocus(),
         completed: [...statusWords.success, ...statusWords.already, ...statusWords.defaults]
           .some(word => word && lower.includes(String(word).toLowerCase())),
         kind: waf ? 'waf' : interstitial ? 'cloudflare' : widget ? 'turnstile' : 'none',
         interstitial: interstitial || waf, widget, token: Boolean(token),
+        widgets_visible: nodes('.cf-turnstile').filter(node => {
+          const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+          return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+        }).length,
         slider: /滑动认证|拖动滑块验证|拖動滑塊驗證/.test(text),
         login: /\/(?:auth\/(?:sign-in|login)|login\.php|takelogin\.php)(?:\/|$)/i.test(location.pathname) ||
           Boolean(document.querySelector('input[type="password"]')),
@@ -100,9 +122,22 @@ export default async function ({ page, context }) {
 
   const clickedFrames = new Map();
   async function clickChallenge() {
+    if (lastState.kind === 'waf' && wafClicks < 3 && Date.now() - wafClickedAt >= 2500) {
+      let button;
+      try {
+        button = await page.$('#sl-check');
+        if (button && await button.boundingBox() && !await button.evaluate(node => node.disabled)) {
+          wafClickedAt = Date.now();
+          await button.click();
+          wafClicks += 1;
+        }
+      } catch (error) { clickError = error.name || 'Error'; }
+      finally { if (button) await button.dispose().catch(() => {}); }
+    }
     for (const frame of challengeFrames()) {
       const previous = clickedFrames.get(frame) || { count: 0, at: 0 };
       if (previous.count >= 3 || Date.now() - previous.at < 2500) continue;
+      clickedFrames.set(frame, { count: previous.count, at: Date.now() });
       try {
         const checkbox = await frame.$('input[type="checkbox"]');
         try {
@@ -111,20 +146,27 @@ export default async function ({ page, context }) {
           } else {
             // The checkbox may be inside a closed shadow root. Click only a visible widget frame.
             const element = await frame.frameElement();
+            if (!element) { frameAction = 'missing_element'; continue; }
             try {
               const box = await element.boundingBox();
-              if (!box || box.width < 100 || box.height < 30) continue;
-              await page.mouse.click(box.x + 30, box.y + Math.min(32, box.height / 2));
+              if (!box || box.width < 100 || box.height < 30) { frameAction = 'not_visible'; continue; }
+              // ElementHandle.click scrolls into view before calculating the click position.
+              await element.click({ offset: { x: 30, y: Math.min(32, box.height / 2) } });
             } finally { await element.dispose(); }
           }
           checkboxClicks += 1;
+          frameAction = 'clicked';
           clickedFrames.set(frame, { count: previous.count + 1, at: Date.now() });
         } finally { if (checkbox) await checkbox.dispose(); }
-      } catch { /* a challenge can replace its iframe while we inspect it */ }
+      } catch (error) {
+        // A challenge can replace its iframe; preserve a bounded reason instead of hiding every failure.
+        frameAction = 'error'; clickError = error.name || 'Error';
+      }
     }
   }
 
   async function waitChallenge() {
+    await page.bringToFront();
     const until = Math.min(deadline, Date.now() + Number(rule.cloudflare_wait || 60) * 1000);
     while (Date.now() < until) {
       let current;
@@ -134,6 +176,7 @@ export default async function ({ page, context }) {
       }
       if (current.login || current.completed || current.slider) return current;
       if (!current.interstitial && (!(current.widget || current.frames) || current.token)) return current;
+      if (current.visibility !== 'visible' || !current.focused) await page.bringToFront();
       await clickChallenge();
       await sleep(500);
     }
@@ -167,6 +210,8 @@ export default async function ({ page, context }) {
 
   async function navigate(url) {
     try {
+      // Browserless also has a Function runner tab; activate the site before its scripts start.
+      await page.bringToFront();
       const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: Math.min(45000, remaining()) });
       navigationStatus = response?.status() || 0;
     } catch (error) {
@@ -324,6 +369,7 @@ export default async function ({ page, context }) {
       await page.evaluateOnNewDocument(installDOM);
       page.on('dialog', dialog => dialog.accept().catch(() => {}));
       page.on('request', request => {
+        if (verificationResource(request) && request.resourceType() === 'script') challengeScript = 'loading';
         try {
           const url = new URL(request.url());
           if (request.method() === 'POST' && url.origin === target.origin) {
@@ -332,7 +378,17 @@ export default async function ({ page, context }) {
           }
         } catch { /* non-HTTP request */ }
       });
+      page.on('requestfailed', request => {
+        if (!verificationResource(request)) return;
+        if (request.resourceType() === 'script') challengeScript = 'failed';
+        resourceError = /^net::(ERR_[A-Z_]+)$/.exec(request.failure()?.errorText || '')?.[1] || 'NETWORK_ERROR';
+      });
       page.on('response', response => {
+        if (verificationResource(response.request())) {
+          const failed = response.status() >= 400;
+          if (response.request().resourceType() === 'script') challengeScript = failed ? 'failed' : 'loaded';
+          if (failed) resourceError = 'HTTP_' + response.status();
+        }
         if (response.request().isNavigationRequest() && response.request().frame() === page.mainFrame()) {
           navigationStatus = response.status();
         }
