@@ -1,6 +1,6 @@
 # PT站点签到（私有部署版）
 
-基于 [qingyukb/MoviePilot-Plugins 的 PTSiteSignIn 1.9.3](https://github.com/qingyukb/MoviePilot-Plugins/tree/d1e6ad90ff949f14920cf18451abe9e3b5bb1bb6/plugins.v3/ptsitesignin) 改造，保留原作者署名与站点规则。版本号与上游保持一致，当前为 **1.9.3**；私有改造通过插件名的“（私有部署版）”后缀区分，便于后续同步上游特性并重新应用改造。本地源代码和索引已同步，未发布。
+基于 [qingyukb/MoviePilot-Plugins 的 PTSiteSignIn 1.9.3](https://github.com/qingyukb/MoviePilot-Plugins/tree/d1e6ad90ff949f14920cf18451abe9e3b5bb1bb6/plugins.v3/ptsitesignin) 改造，保留原作者署名与站点规则。已核对上游 [1.9.4](https://github.com/qingyukb/MoviePilot-Plugins/commit/2e4cb36dc895266adf027f25c847d09feb5500fc) 的改动，版本号同步为 **1.9.4**，便于 MoviePilot 从 1.9.3 检测更新。该次上游更新没有新增站点规则；本版已支持根地址、完整 Function 端点和空 Token，继续保留私有 Function 实现。私有改造通过插件名的“（私有部署版）”后缀区分，便于后续同步上游特性并重新应用改造。
 
 浏览器任务只使用自己部署的 Browserless v2 **Function API**。不调用 BrowserQL、Cloud 求解器或其他公共解题服务，不会自动回退到官方 Cloud。
 

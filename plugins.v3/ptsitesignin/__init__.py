@@ -177,7 +177,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到（私有部署版）"
     plugin_desc = "自建 Browserless Function 与 MoviePilot-OCR 签到，保留 HTTP 和本机浏览器，无 Cloud 回退。"
     plugin_icon = "signin.png"
-    plugin_version = "1.9.3"
+    plugin_version = "1.9.4"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"

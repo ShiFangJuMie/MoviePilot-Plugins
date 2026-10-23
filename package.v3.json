@@ -1119,11 +1119,12 @@
   "PTSiteSignIn": {
     "name": "PT站点签到（私有部署版）",
     "description": "自建 Browserless Function 与 MoviePilot-OCR 签到，保留 HTTP 和本机浏览器，无 Cloud 回退。",
-    "version": "1.9.3",
+    "version": "1.9.4",
     "icon": "signin.png",
     "author": "qingyukb",
     "level": 2,
     "history": {
+      "v1.9.4": "版本号对齐上游 1.9.4，便于从 1.9.3 检测更新；继续使用自建 Function 与独立 OCR，已支持根地址、完整 Function 端点和空 Token，保留猪猪、Sunny 远端浏览器及验证流程修复。",
       "v1.9.3": "基于上游 1.9.3 的私有部署改造：自建 Function、独立 OCR 与鉴权代理；猪猪和 Sunny 默认远端浏览器；补齐验证等待、自动提交、AJAX 回执与预检，修复状态误判并增加脱敏诊断。"
     },
     "system_version": ">=3.0.0",
