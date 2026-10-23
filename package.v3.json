@@ -1115,5 +1115,18 @@
       "v1.1.0": "改为后台定时统计并缓存，页面与仪表板秒出，避免统计阻塞 Web 界面",
       "v1.0.0": "初始版本"
     }
+  },
+  "PTSiteSignIn": {
+    "name": "PT站点签到（私有部署版）",
+    "description": "自建 Browserless Function 与 MoviePilot-OCR 签到，保留 HTTP 和本机浏览器，无 Cloud 回退。",
+    "version": "1.9.3",
+    "icon": "signin.png",
+    "author": "qingyukb",
+    "level": 2,
+    "history": {
+      "v1.9.3": "基于上游 1.9.3 的私有部署改造：自建 Function 后端、独立 OCR 与浏览器代理；猪猪默认使用自建 Function；修复 CF 错误页回退和模块会话复用。"
+    },
+    "system_version": ">=3.0.0",
+    "release": false
   }
 }
