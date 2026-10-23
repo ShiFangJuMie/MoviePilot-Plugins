@@ -26,17 +26,23 @@ OCR 使用 [jxxghp/MoviePilot-OCR](https://github.com/jxxghp/MoviePilot-OCR) 的
 - `engine: function`：自建浏览器。旧的 `engine: browserless` 规则仍可使用，自动映射到 Function。
 - `engine: playwright`：MoviePilot 本机浏览器；本机助手不可用时，使用已配置的自建 Function。
 
-猪猪（`piggo.me`）默认使用 `engine: function`、`mode: cloudflare`，从首页点击签到，保留 40 秒验证等待和 15 秒提交后等待。执行在自建 Browserless 中，不启动 MoviePilot 本机浏览器；Function 未配置或失败时直接报告失败。已有自定义规则若将猪猪固定为 `engine: playwright`，须改为 `engine: function`，因为自定义规则优先于内置预设。
+猪猪（`piggo.me`）默认使用 `engine: function`、`mode: cloudflare`，从首页点击签到；验证阶段最多等待 60 秒，提交后最多等待 15 秒，出现结果时提前结束。Sunny 也默认使用 Function，等待异步签到卡片与可用按钮出现，不把日历图例里的“已签到”算作今日完成。两站都使用自建 Browserless 的出口代理，不启动 MoviePilot 本机浏览器。已有自定义规则若固定为 `engine: playwright`，须改为 `engine: function`，因为自定义规则优先于内置预设。
 
 | mode | 行为 |
 | --- | --- |
 | `open_page` | 打开页面，按选择器与文字点击，检查实际结果 |
-| `cloudflare` | 等待浏览器自身的 JS 验证，尝试点击可见的 Turnstile 复选框；自动签到站点等待原生回调完成提交 |
+| `cloudflare` | 启用开源 Chromium 的 `launch.stealth`，等待 JS 验证；读取 open Shadow DOM 中的验证结果，对可见验证框有限次点击；自动签到先等待原生提交，再按站内回调或表单兜底 |
 | `image` | 截图图片验证码，调用自建 OCR，填入并提交 |
 | `trigger_image` | 先打开验证码弹窗，再截图、识别与提交 |
 | `altcha` | 点击 Altcha 控件，等验证载荷生成后提交 |
 
 每个站点的一次浏览器尝试只发一个 Function 请求，内部完成验证、签到和回读。HTTP 403/503 的挑战正文会先识别，避免错误状态码阻断浏览器回退。
+
+`preflight_path` 会先在同一会话检查已签到状态；`submit_method: ajax` 会提交真实表单并读取接口回执，包括文本回执。自动提交仅在取得验证结果、且尚未观察到提交请求时兜底；已调用回调或发出请求后不会补发第二次 POST。表单兜底仅允许同源目标。
+
+观众的验证等待预算由 15 秒调整为 60 秒。建议将浏览器任务总超时设为 180 秒；各阶段共用总预算，超时前尽量返回诊断。失败原因会附加阶段、耗时、页面 HTTP 状态、验证结果是否取得、验证框点击次数和提交请求数，不输出实际验证码 token 或 Cookie。页面脚本中残留的 WAF 字样、猪猪导航里的“两步验证”链接不再单独作为失败依据。
+
+若自建实例需要关闭 stealth，可在 Browserless 地址的 `launch` 查询参数中明确设置 `{"stealth":false}`；插件保留显式配置。stealth 是浏览器启动选项，不包含 Cloud 的付费求解器。
 
 ## 能力边界
 
@@ -44,7 +50,7 @@ OCR 使用 [jxxghp/MoviePilot-OCR](https://github.com/jxxghp/MoviePilot-OCR) 的
 - 普通 Chromium 能否通过 Cloudflare 取决于站点验证和实例出口。此版本没有付费 solve 等价能力，未通过会明确失败，不把点击或 HTTP 200 当作成功。
 - 农场 HTTP 模块复用 Cookie 会话，保存验证接口下发的新 Cookie；如果页面仍要求滑块，报告需要专用适配。
 - 天空的 HTTP/OCR 模块和浏览器图片模式均使用配置的自建 OCR。北洋保留原海报比对模块。
-- 猪猪使用自建 Browserless 或其浏览器代理的出口，仍需符合站点的异地登录校验。Sunny 保留原本机 Playwright 路线。
+- 猪猪与 Sunny 使用自建 Browserless 或其浏览器代理的出口，仍需符合站点的异地登录校验；真实的登录页或二级验证页面会报告失败。
 - 不确定的浏览器提交结果不会在传输层自动重放。插件的定时失败重试仍受“失败重试次数”配置控制。
 
 ## 本地安装与验证

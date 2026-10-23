@@ -1124,7 +1124,7 @@
     "author": "qingyukb",
     "level": 2,
     "history": {
-      "v1.9.3": "基于上游 1.9.3 的私有部署改造：自建 Function 后端、独立 OCR 与浏览器代理；猪猪默认使用自建 Function；修复 CF 错误页回退和模块会话复用。"
+      "v1.9.3": "基于上游 1.9.3 的私有部署改造：自建 Function、独立 OCR 与鉴权代理；猪猪和 Sunny 默认远端浏览器；补齐验证等待、自动提交、AJAX 回执与预检，修复状态误判并增加脱敏诊断。"
     },
     "system_version": ">=3.0.0",
     "release": false

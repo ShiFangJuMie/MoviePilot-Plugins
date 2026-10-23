@@ -2,6 +2,7 @@
 import json
 import sys
 import urllib.error
+import urllib.parse
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -94,6 +95,7 @@ def test_transport_failure_is_not_replayed_and_never_exposes_token():
     assert result.status == "failed" and result.transient
     assert opener.open.call_count == 1
     assert "private-fixture-token" not in result.message
+    assert "TimeoutError" in result.message
 
 
 def test_http_challenge_on_403_or_503_can_reach_function_fallback():
@@ -201,3 +203,106 @@ def test_self_hosted_configuration_round_trips_and_is_exposed_in_form():
         assert "browserless_token2" not in models
     finally:
         plugin.stop_service()
+
+
+def test_piggo_security_navigation_is_not_a_second_factor_challenge():
+    rule = core.resolve_rule({"url": "https://piggo.me"}, {})
+    page = '<body><a href="/usercp.php?action=security">两步验证</a><p>签到成功</p></body>'
+    assert core.classify(page, rule).status == "success"
+    challenge = '<h1>异地登录安全验证</h1><form><label>两步验证</label><input name="otp"></form>'
+    assert core.classify(challenge, rule).status == "failed"
+
+
+def test_sunny_calendar_legend_does_not_count_as_today_signed():
+    rule = core.resolve_rule({"url": "https://sunnypt.top"}, {})
+    page = '<body>今天别忘了签到<button>立即签到</button><footer>已签到 今天 可补签</footer></body>'
+    assert core.classify(page, rule).status == "failed"
+    assert core.classify('<body>今日签到已完成</body>', rule).status == "already"
+
+
+def test_browser_result_ignores_challenge_words_in_inactive_scripts():
+    signer = FunctionSigner("https://private.example", "fixture")
+    html = "<script>window.libraryName='雷池 WAF';</script><body>签到成功</body>"
+    with patch.object(signer, "_request", return_value={"after": html}):
+        assert signer.sign(SITE, {"path": "/attendance.php"}).status == "success"
+
+
+def test_browser_failure_contains_bounded_diagnostics_without_page_secrets():
+    signer = FunctionSigner("https://private.example", "fixture")
+    result = {"error": "execution", "diagnostics": {"stage": "challenge_before", "kind": "turnstile",
+              "elapsed_ms": 31000, "frames": 1, "token": False, "checkbox_clicks": 3,
+              "error_type": "TypeError", "raw": "private-fixture-token"}}
+    with patch.object(signer, "_request", return_value=result):
+        outcome = signer.sign(SITE, {"path": "/attendance.php"})
+    assert outcome.status == "failed"
+    assert "TypeError" in outcome.message and "31.0" in outcome.message
+    assert "private-fixture-token" not in outcome.message
+
+
+def test_cloudflare_launch_uses_stealth_without_overwriting_explicit_options():
+    for options, expected in [(None, True), ({"stealth": False, "args": ["--lang=zh-CN"]}, False)]:
+        address = "https://private.example"
+        if options is not None:
+            address += "?" + urllib.parse.urlencode({"launch": json.dumps(options)})
+        signer = FunctionSigner(address, "fixture")
+        opener = _opener({"after": "<body>今日已签到</body>"})
+        with patch("urllib.request.build_opener", return_value=opener):
+            assert signer.sign(SITE, {"path": "/attendance.php", "mode": "cloudflare"}).status == "already"
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(opener.open.call_args.args[0].full_url).query)
+        launch = json.loads(query.get("launch", ["{}"])[0])
+        assert launch.get("stealth") is expected
+        if options is not None:
+            assert launch["args"] == options["args"]
+
+
+def test_local_browser_waits_for_async_button_and_identifies_login():
+    clock = [0.0]
+    class Page:
+        url = "https://sunnypt.top/user/attendance"
+        context = SimpleNamespace(add_cookies=Mock())
+        def __init__(self, login):
+            self.login = login
+            self.submitted = 0
+        def goto(self, *args, **kwargs): pass
+        def wait_for_load_state(self, *args, **kwargs): pass
+        def wait_for_timeout(self, ms): clock[0] += ms / 1000
+        def content(self):
+            if self.login:
+                return '<form action="/auth/sign-in"><input name="username"><input name="password" type="password"></form>'
+            if self.submitted:
+                return '<body>签到成功</body>'
+            if clock[0] < 0.6:
+                return '<body>正在加载…</body>'
+            return '<body><button>立即签到</button><footer>已签到 今天 可补签</footer></body>'
+        def evaluate(self, *args):
+            if self.login or clock[0] < 0.6:
+                return False
+            self.submitted += 1
+            return True
+    class Helper:
+        page = None
+        def action(self, url, callback, **kwargs):
+            return callback(self.page)
+    rule = core.resolve_rule({"url": "https://sunnypt.top"}, {})
+    for login in (False, True):
+        clock[0] = 0.0
+        Helper.page = Page(login)
+        with patch.object(core, "_load_playwright_helper", return_value=Helper), \
+             patch.object(core.time, "monotonic", side_effect=lambda: clock[0]):
+            result = core.playwright_sign(SITE, rule)
+        if login:
+            assert result.status == "failed" and "Cookie" in result.message
+            assert Helper.page.submitted == 0
+        else:
+            assert result.status == "success" and Helper.page.submitted == 1
+
+
+def test_page_success_can_confirm_an_unrecognised_ajax_receipt():
+    signer = FunctionSigner("https://private.example", "fixture")
+    result = {"after": "<body>签到成功</body>",
+              "ajax": json.dumps({"status": 200, "text": '{"ok":true}'})}
+    with patch.object(signer, "_request", return_value=result):
+        assert signer.sign(SITE, {"path": "/attendance.php"}).status == "success"
+    result["ajax"] = json.dumps({"status": 500, "text": "server error"})
+    with patch.object(signer, "_request", return_value=result):
+        assert signer.sign(SITE, {"path": "/attendance.php"}).status == "failed"

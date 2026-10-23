@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +13,37 @@ from .core import SignResult, classify, classify_ajax_response, cloudflare_pendi
 
 
 FUNCTION_CODE = Path(__file__).with_name("function.js").read_text(encoding="utf-8")
+
+
+def diagnostic_hint(value: Any) -> str:
+    """Only format known counters and enums; never include page text, URLs or tokens."""
+    if not isinstance(value, Mapping):
+        return ""
+    stages = {"preflight": "预检", "navigation": "打开页面", "challenge_before": "验证前",
+              "button": "等待按钮", "submit": "提交", "auto_submit": "自动提交",
+              "challenge_after": "提交后", "verify": "回读核验", "altcha": "Altcha",
+              "ocr_image": "验证码截图", "ocr_http": "OCR"}
+    parts = []
+    if value.get("stage") in stages:
+        parts.append("阶段=" + stages[value["stage"]])
+    elapsed = value.get("elapsed_ms")
+    if isinstance(elapsed, (int, float)) and 0 <= elapsed <= 600000:
+        parts.append(f"耗时={elapsed / 1000:.1f}秒")
+    if value.get("kind") in {"cloudflare", "turnstile", "waf"}:
+        parts.append("验证=" + value["kind"])
+        if isinstance(value.get("token"), bool):
+            parts.append("验证结果=" + ("已取得" if value["token"] else "未取得"))
+    for key, label in (("frames", "验证框"), ("checkbox_clicks", "点击验证框"),
+                       ("requests", "提交请求"), ("http_status", "页面HTTP")):
+        number = value.get(key)
+        if type(number) is int and 0 <= number <= 999:
+            parts.append(f"{label}={number}")
+    if value.get("auto_action") in {"callback", "form"}:
+        parts.append("提交方式=" + value["auto_action"])
+    if value.get("error_type") in {"Error", "TypeError", "ReferenceError", "SyntaxError",
+                                   "TimeoutError", "ProtocolError", "TargetCloseError", "AbortError"}:
+        parts.append("异常=" + value["error_type"])
+    return "；".join(parts)
 
 
 def service_url(address: str, suffix: str) -> str:
@@ -49,6 +81,12 @@ class FunctionSigner:
         # Use the same Bearer authentication as the self-hosted Function endpoint.
         query.pop("token", None)
         query["timeout"] = str(self.timeout * 1000)
+        launch = json.loads(query.get("launch") or "{}")
+        if not isinstance(launch, dict) or not isinstance(launch.get("args", []), list):
+            raise ValueError("Browserless launch 配置必须包含有效的 args 数组")
+        if context["rule"].get("mode") == "cloudflare":
+            # OSS Chromium supports this launch option; it is not the paid /stealth/bql route.
+            launch.setdefault("stealth", True)
         if self.browser_proxy:
             proxy = urllib.parse.urlsplit(self.browser_proxy)
             if proxy.scheme not in {"http", "https", "socks5"} or not proxy.hostname:
@@ -57,15 +95,13 @@ class FunctionSigner:
                 raise ValueError("Chromium 不支持带用户名密码的 SOCKS5 代理，请使用 HTTP 代理")
             # Proxy credentials belong in page.authenticate, never in the launch URL.
             server = urllib.parse.urlunsplit((proxy.scheme, proxy.netloc.rsplit("@", 1)[-1], "", "", ""))
-            launch = json.loads(query.get("launch") or "{}")
-            if not isinstance(launch, dict) or not isinstance(launch.get("args", []), list):
-                raise ValueError("Browserless launch 配置必须包含有效的 args 数组")
             launch["args"] = [arg for arg in launch.get("args", [])
                               if not str(arg).startswith("--proxy-server=")] + ["--proxy-server=" + server]
-            query["launch"] = json.dumps(launch)
             if proxy.username:
                 context["proxy_auth"] = {"username": urllib.parse.unquote(proxy.username),
                                          "password": urllib.parse.unquote(proxy.password or "")}
+        if launch:
+            query["launch"] = json.dumps(launch)
         url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path,
                                       urllib.parse.urlencode(query), ""))
         headers = {"Content-Type": "application/json"}
@@ -93,6 +129,7 @@ class FunctionSigner:
                    "base_url": base, "cookie": cookie, "ua": str(site.get("ua") or ""),
                    "rule": effective, "ocr_url": self.ocr_url,
                    "timeout_ms": self.timeout * 1000}
+        started = time.monotonic()
         try:
             result = self._request(context)
         except urllib.error.HTTPError as error:
@@ -101,9 +138,12 @@ class FunctionSigner:
             if error.code == 404:
                 return SignResult("failed", "自建 Browserless Function 接口返回 404，请检查根地址或 /chromium/function")
             return SignResult("failed", f"自建 Browserless HTTP {error.code}")
-        except (TimeoutError, urllib.error.URLError, OSError):
+        except (TimeoutError, urllib.error.URLError, OSError) as error:
             # Do not retry an uncertain submission here: the site may already have accepted it.
-            return SignResult("failed", "自建浏览器连接中断或超时，签到结果未确认", transient=True)
+            cause = error.reason if isinstance(error, urllib.error.URLError) else error
+            kind = type(cause).__name__ if isinstance(cause, BaseException) else "URLError"
+            return SignResult("failed", f"自建浏览器连接中断或超时，签到结果未确认"
+                              f"（异常={kind}；耗时={time.monotonic() - started:.1f}秒）", transient=True)
         except (ValueError, TypeError):
             return SignResult("failed", "自建浏览器配置无效或 Function 返回了无效 JSON")
         if not isinstance(result, dict):
@@ -116,25 +156,33 @@ class FunctionSigner:
             "ocr_image": "未找到可截图的验证码图片，请检查站点选择器",
             "altcha": "Altcha 验证未完成，未提交签到",
             "button": "自建浏览器未找到可用的签到按钮，请检查选择器和页面登录状态",
+            "submit": "未找到可安全提交的站内签到表单，未发送签到请求",
+            "login": "签到页跳转到了登录页，Cookie 可能已失效",
             "navigation": "自建浏览器无法打开签到页",
             "timeout": "自建浏览器等待超时，签到结果未确认",
             "execution": "自建浏览器执行失败，签到结果未确认",
         }
+        hint = diagnostic_hint(result.get("diagnostics"))
+        suffix = "；" + hint if hint else ""
         if result.get("error"):
-            return SignResult("failed", errors.get(str(result["error"]), errors["execution"]))
+            return SignResult("failed", errors.get(str(result["error"]), errors["execution"]) + suffix)
         html = str(result.get("after") or "")
         if cloudflare_pending(html) or result.get("challenge_pending"):
-            return SignResult("failed", errors["challenge"])
+            return SignResult("failed", errors["challenge"] + suffix)
         if login_page(html):
             return SignResult("failed", "签到页跳转到了登录页，Cookie 可能已失效")
         if not html:
             return SignResult("failed", "自建浏览器返回空页面，未确认签到")
+        # Only a response from the configured sign-in endpoint may provide an AJAX receipt.
+        ajax = None
+        if not effective.get("verify_success_path"):
+            ajax = classify_ajax_response(result.get("ajax"), effective)
+            if ajax is not None and (ajax.status in {"success", "already"}
+                                     or ajax.message.startswith("签到请求失败（HTTP")):
+                return ajax
         judged = classify(html, effective)
         if judged.status in {"success", "already"}:
             return judged
-        # Only a response from the configured sign-in endpoint may provide an AJAX receipt.
-        if not effective.get("verify_success_path"):
-            ajax = classify_ajax_response(result.get("ajax"), effective)
-            if ajax is not None:
-                return ajax
-        return SignResult("failed", "浏览器已完成操作，但页面未确认签到成功")
+        if ajax is not None:
+            return SignResult("failed", ajax.message + suffix)
+        return SignResult("failed", "浏览器已完成操作，但页面未确认签到成功" + suffix)

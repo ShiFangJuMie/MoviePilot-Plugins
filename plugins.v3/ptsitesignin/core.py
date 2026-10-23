@@ -81,7 +81,7 @@ DEFAULT_BROWSERLESS_URL = ""
 # mode 仅对 Function 浏览器引擎有效：
 #   http          直接 HTTP 请求签到接口（默认引擎，无浏览器会话）
 #   open_page     打开页面并点击签到按钮（无需验证码）
-#   cloudflare    打开页面并自动通过 Cloudflare / Turnstile 挑战
+#   cloudflare    打开页面，等待并尝试完成 Cloudflare / Turnstile 验证
 #   image         图片验证码签到
 #   trigger_image 先点开弹窗再处理图片验证码（HDSky 类）
 #   altcha        需先完成 Altcha 人机验证再点击提交（YemaPT 类）
@@ -254,7 +254,7 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "cookie_mode": "browser",
         "method": "GET",
         # Function 在点击签到前后按这个预算轮询验证状态。
-        "cloudflare_wait": 40,
+        "cloudflare_wait": 60,
         "path": "/index.php",
         "submit_method": "dom_click",
         "submit_selector": "a, input[type='submit'], button, [role='button'], span",
@@ -414,8 +414,11 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
     # 已签到时页面上是「今日签到已完成 … 已连续签到 N 天」，按钮变灰的「今日已签到」。
     "sunnypt.top": {
-        # 本机浏览器打开签到页：与手动操作同一 IP，避免站点侧异常校验
-        "engine": "playwright",
+        # 签到卡片异步加载；使用自建浏览器和其代理出口，等待可用按钮出现。
+        "engine": "function",
+        "mode": "open_page",
+        "cookie_mode": "browser",
+        "button_wait": 20000,
         "method": "GET",
         "path": "/user/attendance",
         "submit_method": "dom_click",
@@ -432,7 +435,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 点之前就有「今日已签到」= 已签到（插件会先探一次，不会瞎点）；
         # 点之后出现「今日签到已完成 / 已连续签到 N 天」= 本次签到成功。
         "success_keywords": ["本次获得", "签到成功"],
-        "already_keywords": ["今日已签到", "今日签到已完成", "已连续签到", "已签到"],
+        # 日历图例里也有裸「已签到」，不能据此认定今天已签到。
+        "already_keywords": ["今日已签到", "今日签到已完成", "今天已签到"],
+        "strict_status_keywords": True,
     },
     # ---- 海棠PT（htpt.cc）：/attendance.php 的「每日签到」日历，点按钮签到 ----
     # 已签到时页面直接写「今日已签到 ✓（连续 N 天，今日获得 X 魔力值）」，没有表单；
@@ -495,14 +500,14 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_absent_status": "success",
         "success_keywords": ["签到成功", "领取成功"],
     },
-    # 观众：在同一 Function 浏览器会话中等待 Turnstile 的原生回调，再回读签到页。
+    # 观众：同一会话等待 Turnstile 和原生提交；必要时按回调 / 表单兜底，再回读确认。
     "audiences.me": {
         "engine": "function",
         "mode": "cloudflare",
         "path": "/attendance.php",
         "submit_method": "auto",
         "auto_wait": 30000,
-        "cloudflare_wait": 15,
+        "cloudflare_wait": 60,
         "wait": 15000,
         # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
         # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
@@ -1115,7 +1120,7 @@ _PAGE_CLICK_JS = """
     .filter((node) => {
       const label = (node.value || node.textContent || "").trim();
       const visible = node.offsetParent !== null || node.getClientRects().length > 0;
-      return visible && label.includes(text);
+      return visible && !node.disabled && node.getAttribute('aria-disabled') !== 'true' && label.includes(text);
     })
     .sort((left, right) => {
       const a = (left.value || left.textContent || "").trim().length;
@@ -1293,24 +1298,27 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         except Exception:
             pass
         before = _wait_challenge_clear(page, challenge_budget)
+        after = before
         clicked = False
-        if not before or classify(before, rule).status not in {"success", "already"}:
-            try:
-                clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
-            except Exception:
-                clicked = False
-            try:
+        until = time.monotonic() + min(timeout, max(1, int(rule.get("button_wait") or 15000) / 1000))
+        # DOMContentLoaded can precede a SPA's authenticated API response and button rendering.
+        while time.monotonic() < until:
+            after = page.content() or ""
+            if login_page(after):
+                return {"before": before, "after": after, "clicked": False, "login": True}
+            if classify(after, rule).status in {"success", "already"}:
+                break
+            if _page_has_challenge(after):
+                after = _wait_challenge_clear(page, challenge_budget)
+                if _page_has_challenge(after):
+                    return {"before": before, "after": after, "clicked": False, "challenge": True}
+                continue
+            clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
+            if clicked:
                 page.wait_for_timeout(max(1000, wait_ms))
-            except Exception:
-                pass
-            # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
-            after = _wait_challenge_clear(page, challenge_budget)
-        else:
-            after = before
-            try:
-                after = page.content() or after
-            except Exception:
-                pass
+                after = _wait_challenge_clear(page, challenge_budget)
+                break
+            page.wait_for_timeout(250)
         return {"before": before, "after": after, "clicked": clicked}
 
     try:
@@ -1326,6 +1334,10 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return SignResult("failed", "本地浏览器没拿到页面（检查 MoviePilot 的浏览器依赖）")
 
     after = str(outcome.get("after") or "")
+    if outcome.get("login") or login_page(after):
+        return SignResult("failed", login_required_message("签到页跳转到了登录页"))
+    if outcome.get("challenge") or cloudflare_pending(after):
+        return SignResult("failed", "本机浏览器未通过 Cloudflare / WAF 验证")
     judged = classify(after, rule)
     if judged.status in {"success", "already"}:
         prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
@@ -2303,7 +2315,8 @@ def first_keyword(text: str, keywords: Any) -> str:
 
 def cloudflare_pending(html: str) -> bool:
     """页面是否仍停留在 Cloudflare / 雷池 WAF 的检测页（自动放行后即不再命中）。"""
-    body = html or ""
+    # Loaded JS libraries can retain these names after verification; inspect page text.
+    body = page_text(html or "")
     if re.search(CF_INTERSTITIAL_PATTERN, body, re.IGNORECASE):
         return True
     return bool(re.search(WAF_PATTERN, body, re.IGNORECASE))
@@ -2361,7 +2374,10 @@ def _bonus_message(prefix: str, text: str, rule: Mapping[str, Any]) -> str:
 def classify(html: str, rule: Mapping[str, Any]) -> SignResult:
     full_text = page_text(html)
     lower = full_text.lower()
-    if re.search(SECOND_FACTOR_PATTERN, full_text, re.IGNORECASE):
+    # Piggo's normal navigation includes a link labelled 两步验证 on every logged-in page.
+    auth_text = page_text(re.sub(r"<a\b[^>]*>.*?</a\s*>", " ", html or "",
+                                 flags=re.IGNORECASE | re.DOTALL))
+    if re.search(SECOND_FACTOR_PATTERN, auth_text, re.IGNORECASE):
         return SignResult("failed",
                           "站点要求二级验证（异地登录验证）：请在常用网络下打开站点完成一次验证，"
                           "或换一份完整的 Cookie（含 cf_clearance / 会话）再试")

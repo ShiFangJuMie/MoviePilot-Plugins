@@ -1,4 +1,5 @@
-// Local browser fixtures; no PT sites, remote OCR service, or real credentials are used.
+// Isolated browser fixtures; the Cloudflare iframe URL is fulfilled locally without network access.
+// No PT sites, remote OCR service, or real credentials are used.
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -27,7 +28,7 @@ const pt = http.createServer(async (req, res) => {
   try {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     assert.match(req.headers.cookie || '', /session=fixture/);
-    if (req.url === '/sign') {
+    if (req.url === '/sign' || req.url === '/slow-sign') {
       const body = await readBody(req);
       if (body.includes('imagestring')) {
         const form = new URLSearchParams(body);
@@ -37,6 +38,7 @@ const pt = http.createServer(async (req, res) => {
       signs += 1;
       signed = true;
       res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/slow-sign') await new Promise(resolve => setTimeout(resolve, 1200));
       res.end('{"ok":true}');
     } else if (req.url === '/signed') {
       res.end(signed ? '<body>今日已签到</body>' : '<body>未签到</body>');
@@ -59,6 +61,43 @@ const pt = http.createServer(async (req, res) => {
         customElements.define('altcha-widget',class extends HTMLElement {connectedCallback(){const r=this.attachShadow({mode:'open'});
           r.innerHTML='<div class="altcha"><input type="checkbox"><input type="hidden" name="altchaPayload"></div>';
           r.querySelector('[type=checkbox]').onclick=()=>{r.querySelector('.altcha').dataset.state='verified';r.querySelector('[name=altchaPayload]').value='fixture-proof';};}});
+        const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};</script>`);
+    } else if (req.url === '/delayed') {
+      res.end(`<body>正在加载…<script>setTimeout(()=>{document.body.innerHTML='<form id="form"><button id="submit">立即签到</button></form>';const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};},500)</script></body>`);
+    } else if (req.url === '/shadow-token') {
+      res.end(`<div class="cf-turnstile" id="widget"></div><form id="form"><button id="submit">立即签到</button></form><script>
+        document.getElementById('widget').attachShadow({mode:'open'}).innerHTML='<input name="cf-turnstile-response" value="fixture-proof" type="hidden">';
+        const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};</script>`);
+    } else if (req.url === '/auto-fallback' || req.url === '/auto-inflight') {
+      const inflight=req.url === '/auto-inflight';
+      res.end(`<form action="${inflight ? '/slow-sign' : '/sign'}" method="POST"><input name="cf-turnstile-response" type="hidden" value="fixture-proof"></form><p>验证通过后将自动完成签到</p>
+        ${inflight ? '<script>fetch("/slow-sign",{method:"POST"}).then(r=>r.json()).then(()=>document.body.textContent="签到成功");</script>' : ''}`);
+    } else if (req.url === '/auto-cross-origin') {
+      res.end(`<form action="${ocrUrl}" method="POST"><input name="cf-turnstile-response" type="hidden" value="fixture-proof"></form><p>验证通过后将自动完成签到</p>`);
+    } else if (req.url === '/ajax') {
+      if (req.method === 'POST') {
+        await readBody(req); signs += 1; signed = true; res.end('签到成功');
+      } else res.end('<form action="/ajax" method="POST" onsubmit="return false"><input name="csrf" value="fixture" type="hidden"><button id="submit">立即签到</button></form>');
+    } else if (req.url === '/preflight-target') {
+      res.end('<body>签到表单已关闭</body>');
+    } else if (req.url === '/stale-marker') {
+      res.end(`<script>window.loadedLibrary='雷池 WAF';</script><form id="form"><button id="submit">立即签到</button></form><script>const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};</script>`);
+    } else if (req.url === '/blocked') {
+      res.statusCode=403; res.end('<title>Just a moment...</title><body>Checking your browser</body>');
+    } else if (req.url === '/auto-callback') {
+      res.end(`<form action="/sign" method="POST"><input name="cf-turnstile-response" type="hidden" value="fixture-proof"></form><div data-callback="onVerified"></div><p>验证通过后将自动完成签到</p><script>
+        window.onVerified=()=>setTimeout(()=>fetch('/sign',{method:'POST',body:new FormData(document.querySelector('form'))}).then(r=>r.json()).then(()=>document.body.textContent='签到成功'),300);</script>`);
+    } else if (req.url === '/redirect') {
+      res.end('<form method="POST" action="/redirect-sign"><button id="submit">立即签到</button></form>');
+    } else if (req.url === '/redirect-sign' && req.method === 'POST') {
+      await readBody(req); signs += 1; signed = true;
+      res.statusCode=303; res.setHeader('Location','/signed'); res.end();
+    } else if (req.url === '/verify-delayed') {
+      res.end(`<body>正在加载…<script>setTimeout(()=>document.body.textContent='${signed ? '今日已签到' : '未签到'}',400)</script></body>`);
+    } else if (req.url === '/cf-frame') {
+      res.end(`<iframe title="verification" src="https://challenges.cloudflare.com/mock" width="300" height="70" style="border:0"></iframe>
+        <form id="form"><input type="hidden" name="cf-turnstile-response" id="proof"><button id="submit">立即签到</button></form><script>
+        addEventListener('message',e=>{if(e.origin==='https://challenges.cloudflare.com' && e.data==='fixture-verified')document.getElementById('proof').value='fixture-proof';});
         const form=document.getElementById('form');form.onsubmit=e=>{e.preventDefault();${successScript}};</script>`);
     } else if (req.url === '/slider') {
       res.end('<body>滑动认证</body>');
@@ -121,14 +160,24 @@ function pageAdapter(page) {
 }
 
 let browser;
+let failures = 0;
 try {
   browser = await chromium.launch({ executablePath: process.env.SIGNIN_TEST_BROWSER,
     headless: true, args: ['--disable-background-networking', '--disable-component-update', '--disable-sync'] });
   async function scenario(name, rule, expected, answer = 'ABC123') {
+    if (process.argv[2] && process.argv[2] !== name) return;
     signs = 0; ocrCalls = 0; signed = false; ocrAnswer = answer; serverFailure = undefined;
     const browserContext = await browser.newContext();
     await browserContext.route('**/*', (route) => {
       const url = new URL(route.request().url());
+      if (url.href === 'https://challenges.cloudflare.com/mock') {
+        assert.equal(route.request().headers().cookie, undefined);
+        return route.fulfill({contentType:'text/html',body:`<body style="margin:0"><div id="host"></div><script>
+          const shadow=document.getElementById('host').attachShadow({mode:'closed'});
+          shadow.innerHTML='<input type="checkbox" style="position:absolute;left:16px;top:16px;width:28px;height:28px;margin:0">';
+          let clicks=0;shadow.querySelector('input').onclick=()=>{if(++clicks===2)parent.postMessage('fixture-verified','*');};
+        </script></body>`});
+      }
       return ['localhost', '127.0.0.1'].includes(url.hostname) ? route.continue() : route.abort();
     });
     try {
@@ -136,10 +185,15 @@ try {
       const result = await run({ page: pageAdapter(page), context: { url: base + '/' + name,
         base_url: base, cookie: 'session=fixture', ua: '', ocr_url: ocrUrl, timeout_ms: 15000,
         rule: { path: '/' + name, mode: 'open_page', submit_selector: '#submit', submit_text: '立即签到',
-          preflight_wait: 100, wait: 1000, cloudflare_wait: 3, ...rule } } });
+          preflight_wait: 100, wait: 1000, cloudflare_wait: 3, button_wait: 1500, ...rule } } });
       if (serverFailure) throw serverFailure;
-      expected(result);
+      try { expected(result); } catch (error) {
+        error.message += '\nFunction result: ' + JSON.stringify({error:result.error, diagnostics:result.diagnostics});
+        throw error;
+      }
       console.log(`PASS browser/${name}${answer ? '' : '/empty-ocr'}`);
+    } catch (error) {
+      failures += 1; console.error(`FAIL browser/${name}: ${error.message}`);
     } finally { await browserContext.close(); }
   }
   const imageRule = { mode: 'image', captcha_selector: '#captcha', captcha_input_selector: '#answer' };
@@ -163,9 +217,47 @@ try {
     altcha_payload_selector: 'altcha-widget .altcha[data-state="verified"] input[name="altchaPayload"]' }, (result) => {
     assert.match(result.after, /签到成功/); assert.equal(signs, 1);
   });
+  await scenario('delayed', {}, result => { assert.match(result.after || '', /签到成功/); assert.equal(signs, 1); });
+  await scenario('shadow-token', {mode:'cloudflare'}, result => { assert.match(result.after || '', /签到成功/); assert.equal(signs, 1); });
+  for (const name of ['auto-fallback','auto-inflight']) {
+    await scenario(name, {mode:'cloudflare',submit_method:'auto',auto_wait:500,
+      pending_keywords:['验证通过后将自动完成签到'],verify_success_path:'/signed'}, result => {
+      assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1, 'automatic submission must occur exactly once');
+    });
+  }
+  await scenario('auto-cross-origin', {mode:'cloudflare',submit_method:'auto',auto_wait:500,
+    pending_keywords:['验证通过后将自动完成签到']}, result => {
+    assert.equal(result.error, 'submit'); assert.equal(signs, 0); assert.equal(ocrCalls, 0);
+  });
+  await scenario('ajax', {submit_method:'ajax'}, result => {
+    assert.equal(signs, 1); assert.match(JSON.parse(result.ajax).text, /签到成功/);
+  });
+  await scenario('preflight-target', {preflight_path:'/already'}, result => {
+    assert.match(result.after || '', /今日已签到/); assert.equal(signs, 0);
+  });
+  await scenario('stale-marker', {}, result => { assert.match(result.after || '', /签到成功/); assert.equal(signs, 1); });
+  await scenario('blocked', {mode:'cloudflare',cloudflare_wait:0.2}, result => {
+    assert.equal(result.error, 'challenge'); assert.equal(result.diagnostics.kind, 'cloudflare');
+    assert.equal(result.diagnostics.stage, 'challenge_before'); assert.equal(signs, 0);
+    assert.equal(JSON.stringify(result.diagnostics).includes('session=fixture'), false);
+  });
+  await scenario('auto-callback', {mode:'cloudflare',submit_method:'auto',auto_wait:500,
+    pending_keywords:['验证通过后将自动完成签到'],verify_success_path:'/signed'}, result => {
+    assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1);
+    assert.equal(result.diagnostics.auto_action, 'callback');
+  });
+  await scenario('redirect', {}, result => { assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1); });
+  await scenario('ajax', {submit_method:'ajax',verify_success_path:'/verify-delayed',verify_wait:1000}, result => {
+    assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1);
+  });
+  await scenario('cf-frame', {mode:'cloudflare',cloudflare_wait:5}, result => {
+    assert.match(result.after || '', /签到成功/); assert.equal(signs, 1);
+    assert.equal(result.diagnostics.checkbox_clicks, 2);
+  });
   await scenario('slider', {}, (result) => { assert.equal(result.error, 'slider'); assert.equal(signs, 0); });
   await scenario('disabled', {}, (result) => { assert.equal(result.error, 'button'); assert.equal(signs, 0); });
   await scenario('already', {}, (result) => { assert.match(result.after, /今日已签到/); assert.equal(signs, 0); });
+  if (failures) throw new Error(`${failures} browser scenario(s) failed`);
 } finally {
   if (browser) await browser.close();
   await Promise.all([new Promise(resolve => pt.close(resolve)), new Promise(resolve => ocr.close(resolve))]);
