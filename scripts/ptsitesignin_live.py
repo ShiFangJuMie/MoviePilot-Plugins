@@ -237,11 +237,11 @@ def main() -> int:
     if not use_module or result is None:
         engine = rule["engine"]
         if engine == "flaresolverr":
-            print(f"FlareSolverr 路线：{args.fs}（签到页={rule['path']}，"
+            print(f"FlareSolverr 路线：{rule.get('flare_url') or args.fs}（签到页={rule['path']}，"
                   f"预热页={rule.get('flare_prime_path') or '自动回退'}）")
             signer = package.flaresolverr.FlareSolverrSigner(
-                args.fs, args.timeout, proxy=str(rule.get("flare_proxy") or ""),
-                auth=args.flare_auth)
+                str(rule.get("flare_url") or args.fs), args.timeout,
+                proxy=str(rule.get("flare_proxy") or ""), auth=args.flare_auth)
             if args.dry:
                 try:
                     return flaresolverr_dry(signer, core, package.flaresolverr, rule,
