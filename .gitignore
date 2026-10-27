@@ -166,3 +166,4 @@ cython_debug/
 node_modules/
 yarn.lock
 .DS_Store
+.venv/
