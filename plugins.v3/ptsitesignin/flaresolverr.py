@@ -13,6 +13,7 @@ origin 为空，add_cookie 报 invalid cookie domain），因此拆成会话内�
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import time
@@ -66,12 +67,16 @@ def callback_form(html: str, base: str, default_path: str):
 
 
 def service_url(address: str) -> str:
-    """接受服务根地址或完整 /v1 端点；保留显式路径前缀（反向代理场景）。"""
+    """接受服务根地址或完整 /v1 端点；保留显式路径前缀（反向代理场景）。
+
+    URL 中的用户凭据（``https://user:pass@host/``，nginx Basic Auth 场景）由
+    ``FlareSolverrSigner`` 单独解析成 Authorization 头，这里只产出干净端点。
+    """
     parsed = urllib.parse.urlsplit(str(address or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("FlareSolverr 地址必须是完整的 http:// 或 https:// 地址")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ValueError("FlareSolverr 地址不能包含凭据、查询串或 URL 片段")
+    if parsed.query or parsed.fragment:
+        raise ValueError("FlareSolverr 地址不能包含查询串或 URL 片段")
     path = parsed.path.rstrip("/")
     if not path.endswith("/v1"):
         path += "/v1"
@@ -82,7 +87,18 @@ class FlareSolverrSigner:
     """在一个 FlareSolverr 会话里完成「带 Cookie 打开 → 解 Turnstile → 提交签到」。"""
 
     def __init__(self, address: str, timeout: int = 120, proxy: str = ""):
-        self.endpoint = service_url(address)
+        raw = str(address or "").strip()
+        parsed = urllib.parse.urlsplit(raw)
+        # https://user:pass@host/ 形式的凭据转成 Basic 头（服务挂在 nginx
+        # Basic Auth 后面时用）；其余校验交给 service_url
+        self._basic = ""
+        if parsed.username:
+            self._basic = base64.b64encode(
+                f"{urllib.parse.unquote(parsed.username)}:"
+                f"{urllib.parse.unquote(parsed.password or '')}".encode()).decode()
+            raw = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1],
+                                           parsed.path, parsed.query, parsed.fragment))
+        self.endpoint = service_url(raw)
         # 求解调用内部按 ~10 秒一轮重试（暂停 5 秒 + Tab 串 + 等响应）。
         # 单次求解预算封顶 75 秒：命中复选框通常 30 秒内完成，而 Cloudflare 隧道
         # 一类网关常在 100 秒左右切断长连接——页面加载加上预算必须留在界内，
@@ -113,9 +129,12 @@ class FlareSolverrSigner:
         return min(self.timeout, seconds)
 
     def _call(self, payload: Mapping[str, Any], budget: int) -> Any:
+        headers = {"Content-Type": "application/json"}
+        if self._basic:
+            headers["Authorization"] = "Basic " + self._basic
         request = urllib.request.Request(
             self.endpoint, data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
+            headers=headers, method="POST")
         # MoviePilot → 自建服务的连接不走浏览器出口代理。
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
@@ -210,21 +229,28 @@ class FlareSolverrSigner:
         return classify(self._html(opened), rule)
 
     def _open_sign_page(self, session: str, url: str) -> tuple:
-        """打开签到页；雷池这类自放行检测页用官方 waitInSeconds 等它跳过去。"""
-        page = ""
-        for attempt in range(3):
-            payload = {"cmd": "request.get", "url": url, "session": session,
-                       "maxTimeout": self._budget(90) * 1000}
-            if attempt:
-                # 检测页由自己的 JS 跑几秒后放行重定向：等一拍再取页面
-                payload["waitInSeconds"] = 8
-            opened = self._call(payload, self._budget(90) + (8 if attempt else 0))
-            if str(opened.get("status")) != "ok":
-                return False, self._reason(opened), ""
-            page = self._html(opened)
-            if not cloudflare_pending(page):
-                return True, "", page
-        return False, "", page
+        """打开签到页；检测页给一次足够长的等待让它自己跑完。
+
+        注意不能反复重载：CF 整页挑战每次加载都会重新求解，但雷池这类
+        「JS 跑够约 10 秒自动放行」的墙会被重载清零进度——所以只重试一次，
+        且等待给足（20 秒），失败原因如实报告停在检测页。
+        """
+        opened = self._call({"cmd": "request.get", "url": url, "session": session,
+                             "maxTimeout": self._budget(90) * 1000}, self._budget(90))
+        if str(opened.get("status")) != "ok":
+            return False, self._reason(opened), ""
+        page = self._html(opened)
+        if not cloudflare_pending(page):
+            return True, "", page
+        waited = self._call({"cmd": "request.get", "url": url, "session": session,
+                             "waitInSeconds": 20, "maxTimeout": self._budget(90) * 1000},
+                            self._budget(90) + 25)
+        if str(waited.get("status")) != "ok":
+            return False, self._reason(waited), page
+        page = self._html(waited)
+        if not cloudflare_pending(page):
+            return True, "", page
+        return False, "页面持续停在 Cloudflare / 雷池检测页（等待 20 秒未放行）", page
 
     def _diagnostic_shot(self, session: str, url: str) -> None:
         """求解失败后对签到页拍一张诊断截图（页面会重载，但能看到组件形态）。

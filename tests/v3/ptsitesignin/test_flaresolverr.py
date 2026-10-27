@@ -75,7 +75,7 @@ def test_service_url_accepts_root_and_v1():
     assert service_url("https://flare.example") == "https://flare.example/v1"
     assert service_url("https://flare.example/v1") == "https://flare.example/v1"
     assert service_url("https://flare.example/prefix/") == "https://flare.example/prefix/v1"
-    for bad in ["flare.example", "https://user:pass@flare.example", "https://flare.example/v1?x=1"]:
+    for bad in ["flare.example", "https://flare.example/v1?x=1", "https://flare.example/v1#f"]:
         try:
             service_url(bad)
         except ValueError:
@@ -144,6 +144,30 @@ def test_tabs_till_turnstile_counts_focus_order():
     assert core.tabs_till_turnstile("<html><body><a href='/x'>x</a></body></html>") == 0
     assert core.turnstile_widget_in(WIDGET_PAGE) is True
     assert core.turnstile_widget_in("<html><body>普通页面</body></html>") is False
+
+
+def test_credentials_in_service_url_become_basic_auth_header():
+    import base64
+    signer = FlareSolverrSigner("https://user:pa%40ss@flare.example/", 120)
+    assert signer.endpoint == "https://flare.example/v1"
+    recorder = _Recorder(
+        {"status": "ok", "message": "Session created successfully."},
+        _ok("<html><body>登录页</body></html>"),
+        _ok(ALREADY_PAGE),
+        {"status": "ok", "message": "The session has been removed."},
+    )
+    captured = {}
+
+    def spying(_self, payload, budget, **kwargs):
+        import urllib.request as _rq
+        return recorder(payload, budget)
+
+    with patch.object(FlareSolverrSigner, "_call", recorder):
+        result = signer.sign(SITE, _rule())
+    assert result.status == "already"
+    # 凭据只进入 Authorization 头，不留在端点 URL 里
+    assert "user:pa" not in signer.endpoint
+    assert signer._basic == base64.b64encode(b"user:pa@ss").decode()
 
 
 def test_full_session_flow_solves_and_posts_once():
