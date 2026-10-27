@@ -15,10 +15,22 @@
 import base64
 import os
 import re
+import signal
 import sys
 import time
 
 from playwright.sync_api import sync_playwright
+
+
+def _watchdog(seconds: int = 300):
+    """硬超时：隧道 TLS 握手可能无限卡死（旧版 playwright 没有覆盖该阶段的
+    超时），到点直接退出，绝不挂死。"""
+    def _fire(signum, frame):
+        print("结果：failed（全局超时：链路长时间无响应，多为隧道抖动，可重试）",
+              file=sys.stderr)
+        sys.exit(1)
+    signal.signal(signal.SIGALRM, _fire)
+    signal.alarm(seconds)
 
 SUCCESS_WORDS = ("签到成功", "簽到成功", "成功签到", "打卡成功", "获得")
 ALREADY_WORDS = ("今日已签", "今天已签", "已经签到", "已签到", "已簽到", "明日")
@@ -35,6 +47,7 @@ def flag(name: str) -> str:
 
 
 def main() -> int:
+    _watchdog()
     site = flag("--site") or "piggo.me"
     path = flag("--path") or "/attendance.php"
     endpoint = (os.environ.get("CLOAK_ENDPOINT") or "").strip().rstrip("/")
@@ -47,10 +60,42 @@ def main() -> int:
     headers = {}
     if auth:
         headers["Authorization"] = "Basic " + base64.b64encode(auth.encode()).decode()
-    query = ""
+    # 每次运行用独立的 fingerprint seed：免费层只有 1 个并发会话，
+    # 复用默认 seed 会撞上残留连接（表现为 WS 排队挂死）；结束时会显式 close。
+    seed = f"pt{int(time.time())}"
+    import urllib.parse as _uparse
+    params = {"fingerprint": seed}
     if os.environ.get("CLOAK_PROXY", "").strip():
-        import urllib.parse
-        query = "?proxy=" + urllib.parse.quote(os.environ["CLOAK_PROXY"].strip())
+        params["proxy"] = os.environ["CLOAK_PROXY"].strip()
+    query = "?" + _uparse.urlencode(params)
+
+    # 先自己发现 webSocketDebuggerUrl 再连 ws：旧版 Playwright 的
+    # connect_over_cdp 会给 http 地址自动追加 /json/version（传完整路径会拼出
+    # /json/version/json/version），而且 query 参数（?proxy=）也要挂在发现请求上。
+    import json as _json
+    import urllib.request as _rq
+    ws_url = ""
+    for attempt in range(3):  # 隧道偶发 SSLEOF：发现请求退避重试
+        try:
+            discovery = _rq.Request(f"{endpoint}/json/version{query}", headers=headers)
+            with _rq.build_opener(_rq.ProxyHandler({})).open(discovery, timeout=30) as response:
+                ws_url = str(_json.loads(response.read().decode()).get("webSocketDebuggerUrl") or "")
+            break
+        except Exception:
+            if attempt == 2:
+                print("结果：failed（发现请求连续失败：隧道抖动，可稍后重试）", file=sys.stderr)
+                return 1
+            time.sleep(6 * (attempt + 1))
+    if not ws_url.startswith("ws"):
+        print("结果：failed（未能取得 webSocketDebuggerUrl，检查端点/凭据）", file=sys.stderr)
+        return 1
+
+    def close_seed() -> None:
+        try:
+            close = _rq.Request(f"{endpoint}/fingerprint/{seed}/close", headers=headers, method="POST")
+            _rq.build_opener(_rq.ProxyHandler({})).open(close, timeout=15).read()
+        except Exception:
+            pass
 
     cookies = []
     for item in cookie.split(";"):
@@ -71,18 +116,28 @@ def main() -> int:
         return "", ""
 
     with sync_playwright() as manager:
-        browser = manager.chromium.connect_over_cdp(
-            f"{endpoint}/json/version{query}", headers=headers, timeout=30000)
+        # 隧道偶发抖动，WS 建立给足预算；失败提示里带上可重试说明
+        try:
+            browser = manager.chromium.connect_over_cdp(ws_url, headers=headers, timeout=60000)
+        except Exception as error:
+            print(f"结果：failed（CDP 连接失败：{type(error).__name__}；隧道偶发抖动，可直接重试）",
+                  file=sys.stderr)
+            return 1
         try:
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             context.add_cookies(cookies)
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(f"https://{site}{path}", wait_until="domcontentloaded", timeout=60000)
-            # 雷池检测页自己的 JS 跑若干秒；确认按钮出现就点；签到页打开后自动完成签到
+            # 雷池检测页自己的 JS 跑若干秒；确认按钮出现就点；签到页打开后自动完成签到。
+            # 挑战通过时页面会跳转——跳转瞬间 evaluate 会抛
+            # "Execution context was destroyed"，那是好事，继续轮询新页面即可。
             clicked = 0
             for _ in range(TIMEOUT_SECONDS // 2):
                 page.wait_for_timeout(2000)
-                text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+                try:
+                    text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+                except Exception:
+                    continue
                 status, message = judge(text)
                 if status:
                     print(f"结果：{status}（{message}）")
@@ -97,16 +152,33 @@ def main() -> int:
                                 break
                         except Exception:
                             continue
-            text = page.evaluate("document.body ? document.body.innerText : ''") or ""
-            title = page.title()
+            text = ""
+            title = ""
+            try:
+                text = page.evaluate("document.body ? document.body.innerText : ''") or ""
+                title = page.title()
+            except Exception:
+                pass
+            print(f"最终标题：{title}")
+            print(f"正文摘要：{' '.join(text.split())[:200]}")
+            dump = os.environ.get("CLOAK_DUMP")
+            if dump:
+                try:
+                    with open(dump, "w", encoding="utf-8") as handle:
+                        handle.write(page.content())
+                    print(f"页面已保存：{dump}")
+                except Exception:
+                    pass
             if "登录" in title:
                 print("结果：failed（停在登录页：Cookie 失效或会话环境不匹配）")
             else:
-                print(f"结果：failed（{TIMEOUT_SECONDS} 秒未确认签到；标题「{title[:30]}」；"
-                      f"正文「{' '.join(text.split())[:80]}」）")
+                print(f"结果：failed（{TIMEOUT_SECONDS} 秒未确认签到）")
             return 1
         finally:
-            browser.close()
+            try:
+                browser.close()
+            finally:
+                close_seed()
 
 
 if __name__ == "__main__":
