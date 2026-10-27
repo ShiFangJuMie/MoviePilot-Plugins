@@ -46,6 +46,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO_ROOT / "plugins.v3" / "ptsitesignin"
 DEFAULT_FLARESOLVERR = "https://https://<REDACTED-INSTANCE>/"
 DEFAULT_BROWSERLESS = "https://https://<REDACTED-INSTANCE>/"
+DEFAULT_BQL_CLOUD = "https://production-sfo.browserless.io"
+# FlareSolverr 引擎预设没写 mode（表单/回调流不需要）；换 BQL 引擎时这些站按 Turnstile 求解流走
+BQL_CLOUDFLARE_HOSTS = {"mua.xloli.cc", "ourbits.club", "audiences.me"}
 
 
 def load_plugin_modules():
@@ -53,7 +56,7 @@ def load_plugin_modules():
     package = types.ModuleType("ptsitesignin")
     package.__path__ = [str(PLUGIN_DIR)]
     sys.modules["ptsitesignin"] = package
-    for name in ("core", "flaresolverr", "function"):
+    for name in ("core", "flaresolverr", "function", "bql"):
         spec = importlib.util.spec_from_file_location(f"ptsitesignin.{name}", PLUGIN_DIR / f"{name}.py")
         module = importlib.util.module_from_spec(spec)
         sys.modules[f"ptsitesignin.{name}"] = module
@@ -144,8 +147,12 @@ def flaresolverr_dry(signer, core, flare, rule, base_url, cookie, save_html, scr
 def main() -> int:
     parser = argparse.ArgumentParser(description="PT 站点签到独立联调脚本")
     parser.add_argument("--site", required=True, help="站点域名，如 mua.xloli.cc / piggo.me")
-    parser.add_argument("--engine", choices=["http", "function", "flaresolverr", "module"],
+    parser.add_argument("--engine", choices=["http", "function", "flaresolverr", "bql", "module"],
                         help="覆盖引擎（默认按预设；有站点模块时先走模块，与插件一致）")
+    parser.add_argument("--bql-url", default=DEFAULT_BQL_CLOUD,
+                        help="Browserless Cloud 根地址（BQL 引擎）")
+    parser.add_argument("--bql-token", default=os.environ.get("PTSIGNIN_BQL_TOKEN", "").strip(),
+                        help="Browserless Cloud API Token；也可用环境变量 PTSIGNIN_BQL_TOKEN")
     parser.add_argument("--fs", default=DEFAULT_FLARESOLVERR, help="FlareSolverr 根地址")
     parser.add_argument("--browserless", default=DEFAULT_BROWSERLESS, help="自建 Browserless 根地址")
     parser.add_argument("--browserless-token",
@@ -187,6 +194,14 @@ def main() -> int:
         overrides["flare_proxy"] = args.flare_proxy
     if args.engine:
         overrides["engine"] = args.engine
+        if args.engine == "bql" and args.site in BQL_CLOUDFLARE_HOSTS:
+            # FlareSolverr 预设不写 mode；BQL 引擎下这些站走 Turnstile solve 流
+            overrides.setdefault("mode", "cloudflare")
+            overrides.setdefault("submit_text", "签到")
+        if args.engine == "bql" and args.site == "piggo.me":
+            # piggo 预设的 mode=cloudflare 是 Function 引擎语义（点签到后等雷池放行）；
+            # BQL 下走点击流：点签到 → 点雷池确认 → 等结果
+            overrides["mode"] = "open_page"
 
     package = load_plugin_modules()
     core = package.core
@@ -253,6 +268,19 @@ def main() -> int:
                 shot_path = f"/tmp/ptsitesignin_{args.site}_waf.png"
                 Path(shot_path).write_bytes(base64.b64decode(shot))
                 print(f"验证失败截图已保存：{shot_path}")
+        elif engine == "bql":
+            if not args.bql_token:
+                print("缺少 Browserless Cloud Token：用 --bql-token 或环境变量 PTSIGNIN_BQL_TOKEN")
+                return 2
+            if not args.proxy:
+                print("BQL 引擎必须配置代理（--proxy http://user:pass@host:port），"
+                      "Cloud 共享出口不用于签到")
+                return 2
+            print(f"Browserless Cloud BQL 路线：{args.bql_url}（mode={rule.get('mode')}，"
+                  f"签到页={rule['path']}，代理出口=已启用）")
+            signer = package.bql.BQLSigner(args.bql_url, args.bql_token, args.timeout,
+                                           proxy=args.proxy)
+            result = signer.sign(site, rule)
         else:
             print(f"HTTP 路线：{rule.get('method', 'GET')} {rule['path']}")
             result = core.http_sign_auto(site, rule, timeout=args.timeout, proxies=proxies)
