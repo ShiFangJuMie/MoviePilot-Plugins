@@ -1,13 +1,30 @@
+# 一键起cloakbrowser + foxserve：浏览器内核 CDP 只在容器网络内部可达，
+# 对外仅 foxserve 一个带 Bearer Token 的 HTTP 口（经你的 cloudflared 隧道暴露）。
+# 用法：
+#   1) openssl rand -hex 16 生成一个随机串，填到 FOX_TOKEN
+#   2) CloakBrowser 免费 key 按 README 用 GitHub 登录领取，填到 CLOAKBROWSER_LICENSE_KEY
+#      （免费层即可：最新构建 + 1 并发，逐站顺序签到够用）
+#   3) docker compose up -d --build
+#   4) cloudflared 给 8100 加一条 ingress（例如 https://https://<REDACTED-INSTANCE>/）
 services:
-  foxserve:
-    build: .
-    container_name: foxserve
+  cloakbrowser:
+    image: cloakhq/cloakbrowser
+    command: cloakserve --headless=false
     restart: always
     shm_size: 1g
+    environment:
+      - CLOAKBROWSER_LICENSE_KEY=${CLOAKBROWSER_LICENSE_KEY}
+    # 不映射任何端口：CDP 只给 foxserve 走内网访问
+
+  foxserve:
+    build: .
+    restart: always
+    shm_size: 1g
+    environment:
+      - FOX_TOKEN=${FOX_TOKEN}
+      - FOX_MODE=cloak
+      - FOX_CDP_URL=http://cloakbrowser:9222
     ports:
       - "127.0.0.1:8100:8100"
-    # 如需让浏览器走家里的 Clash 出口（与日常浏览器同源），取消注释并改地址：
-    # environment:
-    #   - FOX_PROXY_SERVER=http://<REDACTED-PROXY>:<PORT>
-    #   - FOX_PROXY_USERNAME=
-    #   - FOX_PROXY_PASSWORD=
+    depends_on:
+      - cloakbrowser

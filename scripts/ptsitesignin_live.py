@@ -285,13 +285,17 @@ def main() -> int:
                                            proxy=args.proxy)
             result = signer.sign(site, rule)
         elif engine == "fox":
-            print(f"foxserve 路线：{args.fox_url}（Playwright+Camoufox，VPS 运行）")
+            print(f"foxserve 路线：{args.fox_url}（远程 Playwright 服务，鉴权={'Bearer' if os.environ.get('PTSIGNIN_FOX_TOKEN') else '无'})")
             payload = json.dumps({"site": args.site, "cookie": cookie,
                                   "path": rule.get("path") or "/attendance.php",
                                   "proxy": ({"server": args.proxy} if args.proxy else None)}).encode()
             import urllib.request as _rq
+            headers = {"Content-Type": "application/json"}
+            fox_token = os.environ.get("PTSIGNIN_FOX_TOKEN", "").strip()
+            if fox_token:
+                headers["Authorization"] = "Bearer " + fox_token
             request = _rq.Request(args.fox_url.rstrip("/") + "/sign", data=payload,
-                                  headers={"Content-Type": "application/json"}, method="POST")
+                                  headers=headers, method="POST")
             try:
                 with _rq.build_opener(_rq.ProxyHandler({})).open(request, timeout=200) as response:
                     data = json.loads(response.read().decode())
