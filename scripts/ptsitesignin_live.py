@@ -147,8 +147,10 @@ def flaresolverr_dry(signer, core, flare, rule, base_url, cookie, save_html, scr
 def main() -> int:
     parser = argparse.ArgumentParser(description="PT 站点签到独立联调脚本")
     parser.add_argument("--site", required=True, help="站点域名，如 mua.xloli.cc / piggo.me")
-    parser.add_argument("--engine", choices=["http", "function", "flaresolverr", "bql", "module"],
+    parser.add_argument("--engine", choices=["http", "function", "flaresolverr", "bql", "fox", "module"],
                         help="覆盖引擎（默认按预设；有站点模块时先走模块，与插件一致）")
+    parser.add_argument("--fox-url", default="https://https://<REDACTED-INSTANCE>/",
+                        help="foxserve（VPS 上 Playwright+Camoufox 服务）根地址")
     parser.add_argument("--bql-url", default=DEFAULT_BQL_CLOUD,
                         help="Browserless Cloud 根地址（BQL 引擎）")
     parser.add_argument("--bql-token", default=os.environ.get("PTSIGNIN_BQL_TOKEN", "").strip(),
@@ -277,10 +279,26 @@ def main() -> int:
                       "Cloud 共享出口不用于签到")
                 return 2
             print(f"Browserless Cloud BQL 路线：{args.bql_url}（mode={rule.get('mode')}，"
-                  f"签到页={rule['path']}，代理出口=已启用）")
+                  f"签到页={rule['path']}，代理出口=已启用，"
+                  f"token {len(args.bql_token)}位 {args.bql_token[:4]}...）")
             signer = package.bql.BQLSigner(args.bql_url, args.bql_token, args.timeout,
                                            proxy=args.proxy)
             result = signer.sign(site, rule)
+        elif engine == "fox":
+            print(f"foxserve 路线：{args.fox_url}（Playwright+Camoufox，VPS 运行）")
+            payload = json.dumps({"site": args.site, "cookie": cookie,
+                                  "path": rule.get("path") or "/attendance.php",
+                                  "proxy": ({"server": args.proxy} if args.proxy else None)}).encode()
+            import urllib.request as _rq
+            request = _rq.Request(args.fox_url.rstrip("/") + "/sign", data=payload,
+                                  headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with _rq.build_opener(_rq.ProxyHandler({})).open(request, timeout=200) as response:
+                    data = json.loads(response.read().decode())
+                result = core.SignResult(str(data.get("status") or "failed"),
+                                         str(data.get("message") or "未知结果"))
+            except Exception as error:
+                result = core.SignResult("failed", f"foxserve 请求失败：{type(error).__name__} {error}")
         else:
             print(f"HTTP 路线：{rule.get('method', 'GET')} {rule['path']}")
             result = core.http_sign_auto(site, rule, timeout=args.timeout, proxies=proxies)

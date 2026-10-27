@@ -626,8 +626,8 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     # Old browserless rules keep working, but always use our self-hosted Function backend.
     if rule["engine"] == "browserless":
         rule["engine"] = "function"
-    if rule["engine"] not in {"http", "function", "playwright", "flaresolverr", "bql"}:
-        raise ValueError("签到引擎只能是 http、function、flaresolverr、bql 或 playwright（兼容 browserless 别名）")
+    if rule["engine"] not in {"http", "function", "playwright", "flaresolverr", "bql", "fox"}:
+        raise ValueError("签到引擎只能是 http、function、flaresolverr、bql、fox 或 playwright（兼容 browserless 别名）")
     rule["auto_fallback"] = not user_engine
     if rule["engine"] in {"http", "playwright", "flaresolverr"}:
         rule.setdefault("path", DEFAULT_HTTP_PATH)

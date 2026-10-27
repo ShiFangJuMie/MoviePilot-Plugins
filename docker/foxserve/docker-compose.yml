@@ -1,0 +1,13 @@
+services:
+  foxserve:
+    build: .
+    container_name: foxserve
+    restart: always
+    shm_size: 1g
+    ports:
+      - "127.0.0.1:8100:8100"
+    # 如需让浏览器走家里的 Clash 出口（与日常浏览器同源），取消注释并改地址：
+    # environment:
+    #   - FOX_PROXY_SERVER=http://<REDACTED-PROXY>:<PORT>
+    #   - FOX_PROXY_USERNAME=
+    #   - FOX_PROXY_PASSWORD=
