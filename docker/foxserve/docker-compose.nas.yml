@@ -1,0 +1,17 @@
+# 家宽 NAS 专用：只用 Camoufox 内核（NAS 本身就是家宽出口，不需要代理，
+# 也不需要 VPS 上的 cloakbrowser）。piggo 的会话疑似绑定登录时的家宽 IP——
+# 家里的浏览器天生满足。仅绑定 127.0.0.1，给本机 MoviePilot / 脚本调用。
+# 用法：
+#   FOX_TOKEN=$(openssl rand -hex 16) docker compose -f docker-compose.nas.yml up -d --build
+#   curl -H "Authorization: Bearer $FOX_TOKEN" http://127.0.0.1:8100/health
+services:
+  foxserve:
+    build: .
+    container_name: foxserve-nas
+    restart: always
+    shm_size: 1g
+    environment:
+      - FOX_TOKEN=${FOX_TOKEN}
+      - FOX_MODE=camoufox
+    ports:
+      - "127.0.0.1:8100:8100"
