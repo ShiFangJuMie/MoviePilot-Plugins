@@ -40,6 +40,9 @@ SAFELINE_CONFIRM = ("#sl-check", "#slg-box button", "div[id^='slg'] button")
 LOGIN_MARK = ("必须登录", "猪猪 :: 登录")
 TIMEOUT_SECONDS = 90
 JAR = os.environ.get("CLOAK_COOKIE_JAR", "/tmp/piggo_cloak_cookies.txt")
+# CF 的 cf_clearance 绑 IP+UA：借 Edge 的通行证（或后续自己的）需要一致的 UA 串
+DEFAULT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36 Edg/155.0.0.0")
 
 
 def _watchdog(seconds: int = 300):
@@ -177,9 +180,17 @@ def main() -> int:
             return 1
         try:
             context = browser.contexts[0] if browser.contexts else browser.new_context()
+            # UA 与 cf_clearance 绑定：每次运行都先覆盖成同一 UA（可用 CLOAK_UA 覆盖）
+            user_agent = os.environ.get("CLOAK_UA", DEFAULT_UA).strip() or DEFAULT_UA
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                cdp = context.new_cdp_session(page)
+                cdp.send("Emulation.setUserAgentOverride",
+                         {"userAgent": user_agent, "platform": "MacIntel"})
+            except Exception:
+                pass
             if cookie:
                 context.add_cookies(parse_cookies(cookie, site))
-            page = context.pages[0] if context.pages else context.new_page()
             page.goto(f"https://{site}{path}", wait_until="domcontentloaded", timeout=120000)
             # 登录页 + 有凭据 → 自动登录一次（会话即属于这个浏览器）
             title = page.title() or ""
