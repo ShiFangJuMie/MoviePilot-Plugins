@@ -198,11 +198,18 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "submit_method": "dom_click",
         "submit_text": "立即签到",
     },
+    # ---- 萝莉（mua.xloli.cc）：NexusPHP 签到表单内嵌 Cloudflare Turnstile ----
+    # 未登录直接访问 attendance.php 是 404（Chrome 错误页 origin 为空，Cookie 写不进
+    # 浏览器），访问首页还会断连；Turnstile 只渲染在登录后的表单里。所以用 FlareSolverr
+    # 会话：先在 login.php 写入 Cookie → 打开签到页 → 原生 tabs_till_verify 解内嵌
+    # widget（次数由插件按页面焦点序推算）→ 同一会话 request.post 提交。token 一次性
+    # 有效，且 NexusPHP 的 siteverify 会核对提交 IP——必须与求解同一个浏览器。
     "mua.xloli.cc": {
-        "engine": "function",
-        "mode": "cloudflare",
+        "engine": "flaresolverr",
         "path": "/attendance.php",
-        "submit_selector": "form[action*='attendance.php'] input[type='submit']",
+        # 未登录时签到页 404、首页断连，Cookie 只能写在 login.php 这样的真实页面上
+        "flare_prime_path": "/login.php",
+        "submit_text": "签到",
     },
     "share.ilolicon.com": {
         "engine": "function",
@@ -500,25 +507,35 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "signin_absent_status": "success",
         "success_keywords": ["签到成功", "领取成功"],
     },
-    # 观众：同一会话等待 Turnstile 和原生提交；必要时按回调 / 表单兜底，再回读确认。
+    # ---- 观众（audiences.me）：Cloudflare 整页挑战 + 签到表单内嵌 Turnstile ----
+    # 访客访问任意页都会先出「Just a moment」整页挑战（FlareSolverr 原生可解），
+    # 登录后的 attendance.php 表单里还有 Turnstile（同萝莉）。走 FlareSolverr 会话：
+    # 预热时整页挑战自动解掉、cf_clearance 留在会话浏览器，再 tabs_till_verify 解
+    # 表单内的组件并同会话提交。原 Function+auto 路线作为备注保留：如需回退，在
+    # 自定义规则里写 {"engine":"function","mode":"cloudflare","submit_method":"auto"}。
     "audiences.me": {
-        "engine": "function",
-        "mode": "cloudflare",
+        "engine": "flaresolverr",
         "path": "/attendance.php",
-        "submit_method": "auto",
-        "auto_wait": 30000,
-        "cloudflare_wait": 60,
-        "wait": 15000,
-        # 签到成功后页面可能跳回首页；同一浏览器会话重新打开 attendance.php 再确认一次，
-        # 避免只看到首页就误报失败，也避免把未完成的验证当成成功。
-        "verify_success_path": "/attendance.php",
-        "verify_wait": 15000,
-        # 「已领取 / 已获得」不能作为成功标志：签到后刷新页面仍会显示奖励，
-        # 很容易把已签到状态误判成刚刚签到。
+        "submit_text": "签到",
+        # 官方 FlareSolverr 的浏览器被该站 sitekey 指纹拒绝（Verifying 死循环），
+        # Browserless 也被 600010 拒绝；TRAWL（Camoufox 反检测 Firefox，FlareSolverr
+        # 兼容 /v1）2026-10-27 实测通过：solveEmbeddedCaptchas 解内嵌组件 → 回调提交。
+        # 萝莉 / OurBits 继续走全局配置的原生 FlareSolverr。
+        "flare_url": "https://https://<REDACTED-INSTANCE>/",
+        # Tab 次数由签到页 HTML 按焦点序自动推算（2026-10-26 已用真实浏览器
+        # Tab 游走核对：推算 50 = 实测 50，无需钉值）。页面改版导致偏差时，用
+        # scripts/ptsitesignin_tabwalk.mjs 校准后以 flare_tabs 钉住。
         "success_keywords": ["签到成功", "簽到成功", "成功签到", "签到完成", "领取成功"],
         "already_keywords": ["今日已签到", "今天已经签到", "您今天已经签到", "已经签到",
                              "已签到", "今日已领取", "已连续签到", "明日再来", "明天再来"],
-        "pending_keywords": ["验证通过后将自动完成签到", "完成人机验证即可领取今日爆米花奖励"],
+    },
+    # ---- OurBits（ourbits.club）：Cloudflare 整页挑战 + NexusPHP attendance ----
+    # 访客访问任意页先出「Just a moment」整页挑战（实测 FlareSolverr 原生解掉），
+    # 登录后按萝莉同款会话流程处理签到表单（如开 Turnstile 则自动求解）。
+    "ourbits.club": {
+        "engine": "flaresolverr",
+        "path": "/attendance.php",
+        "submit_text": "签到",
     },
     # ---- 未内置的站点默认走 HTTP 直连（无需浏览器交互）----
     # GET 打开签到页即完成签到，判定文案取自站点实际页面：
@@ -609,10 +626,10 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     # Old browserless rules keep working, but always use our self-hosted Function backend.
     if rule["engine"] == "browserless":
         rule["engine"] = "function"
-    if rule["engine"] not in {"http", "function", "playwright"}:
-        raise ValueError("签到引擎只能是 http、function 或 playwright（兼容 browserless 别名）")
+    if rule["engine"] not in {"http", "function", "playwright", "flaresolverr"}:
+        raise ValueError("签到引擎只能是 http、function、flaresolverr 或 playwright（兼容 browserless 别名）")
     rule["auto_fallback"] = not user_engine
-    if rule["engine"] in {"http", "playwright"}:
+    if rule["engine"] in {"http", "playwright", "flaresolverr"}:
         rule.setdefault("path", DEFAULT_HTTP_PATH)
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
         rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
@@ -626,7 +643,7 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
 
 def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
     result = dict(rule)
-    if result["engine"] in {"http", "playwright"}:
+    if result["engine"] in {"http", "playwright", "flaresolverr"}:
         path = str(result.get("path") or "")
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("签到路径必须是以 / 开头的站内路径")
@@ -636,6 +653,20 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
         patterns = result.get("signin_token_patterns")
         if patterns is not None and not isinstance(patterns, Mapping):
             raise ValueError("signin_token_patterns 必须是 {字段: 正则} 形式的对象")
+        if result["engine"] == "flaresolverr":
+            tabs = result.get("flare_tabs")
+            if tabs is not None and (not isinstance(tabs, int) or isinstance(tabs, bool)
+                                     or not 1 <= tabs <= 200):
+                raise ValueError("flare_tabs 必须是 1-200 的整数（Tab 按键次数的手工覆盖）")
+            prime = str(result.get("flare_prime_path") or "").strip()
+            if prime and (not prime.startswith("/") or prime.startswith("//") or "#" in prime):
+                raise ValueError("flare_prime_path 必须是以 / 开头的站内路径")
+            proxy = urllib.parse.urlsplit(str(result.get("flare_proxy") or "").strip())
+            if proxy.scheme and (proxy.scheme not in {"http", "https", "socks5"} or not proxy.hostname):
+                raise ValueError("flare_proxy 必须是 http://、https:// 或 socks5:// 地址")
+            service = urllib.parse.urlsplit(str(result.get("flare_url") or "").strip())
+            if service.scheme and (service.scheme not in {"http", "https"} or not service.hostname):
+                raise ValueError("flare_url 必须是 http:// 或 https:// 地址")
         return result
     mode = result.get("mode")
     if mode not in {"open_page", "cloudflare", "image", "trigger_image", "altcha"}:
@@ -848,6 +879,142 @@ def http_sign_form(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: in
     if response.status_code >= 400:
         return None
     return judge_http(response.text or "", rule)
+
+
+def turnstile_widget_in(html: str) -> bool:
+    """页面是否内嵌 Cloudflare Turnstile 组件（区别于整页「Just a moment」挑战）。"""
+    return bool(re.search(TURNSTILE_PATTERN, html or "", re.IGNORECASE))
+
+
+class _FocusOrderParser:
+    """按 Chromium 顺序焦点导航规则枚举 HTML 里的可聚焦元素。
+
+    FlareSolverr v3.5 的原生 Turnstile 解法是「从页面开头按 N 次 Tab 聚焦到
+    验证组件的 iframe，再按 Space 勾选」。N 就是 widget 之前的可聚焦元素数 + 1，
+    这里从签到页 HTML 静态推算，避免在 FlareSolverr 上盲目试错（每次都烧满超时）。
+
+    可见性只认 HTML 自带的信号（hidden / aria-hidden / 内联 display:none /
+    visibility:hidden / 控件 disabled）；类 CSS 的 display:none 静态推导看不到，
+    已知会少数几个——这类站点用 scripts/ptsitesignin_tabwalk.mjs 以真实浏览器
+    校准后，在预设里用 flare_tabs 钉住实测值。
+    """
+
+    VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+                 "meta", "param", "source", "track", "wbr"}
+    CONTROL_TAGS = {"a", "area", "button", "input", "select", "textarea",
+                    "iframe", "object", "embed", "summary"}
+    DISABLED_TAGS = {"button", "input", "select", "textarea", "optgroup", "option", "fieldset"}
+    INLINE_HIDDEN_RE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
+
+    def __init__(self) -> None:
+        self.order = 0
+        # (文档序号, tabindex)；只记录能参与 Tab 导航且未被隐藏的元素
+        self.focusables: List[tuple] = []
+        # Turnstile 容器（cf-turnstile / data-sitekey / 挑战 iframe / 隐藏 token 输入框）
+        # 首次出现的文档序号；脚本标签不算——它在 <head> 里，位置不代表组件位置。
+        self.marker = 0
+        self._stack: List[tuple] = []  # (tag, 是否处于 hidden 祖先内)
+        self._at_hidden = False
+
+    # —— 极简容错解析：只需 start/end 标签与属性，不构建完整 DOM
+    def feed(self, html: str) -> None:
+        for match in re.finditer(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>",
+                                 html or ""):
+            closing, tag, raw_attrs = match.group(1), match.group(2).lower(), match.group(3) or ""
+            attrs: Dict[str, str] = {}
+            for name, _, value in re.findall(r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)(\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+))?", raw_attrs):
+                attrs[name.lower()] = value.strip("\"'")
+            if closing:
+                self._close(tag)
+            else:
+                hidden_self = self._open(tag, attrs)
+                if tag not in self.VOID_TAGS:
+                    # 隐藏容器的子元素同样不可聚焦，栈上要带着隐藏状态
+                    self._stack.append((tag, self._at_hidden or hidden_self))
+                    self._at_hidden = any(hidden for _, hidden in self._stack)
+
+    def _close(self, tag: str) -> None:
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index][0] == tag:
+                del self._stack[index:]
+                self._at_hidden = any(hidden for _, hidden in self._stack)
+                return
+
+    def _open(self, tag: str, attrs: Dict[str, str]) -> bool:
+        """记录一个开标签；返回它自身是否处于不可聚焦的隐藏状态。"""
+        self.order += 1
+        hidden_self = ("hidden" in attrs or attrs.get("aria-hidden") == "true"
+                       or self.INLINE_HIDDEN_RE.search(attrs.get("style") or ""))
+        if self.marker == 0 and self._is_marker(tag, attrs):
+            self.marker = self.order
+        if hidden_self or self._at_hidden:
+            return True
+        if "disabled" in attrs and tag in self.DISABLED_TAGS:
+            return
+        tabindex_raw = attrs.get("tabindex")
+        if tabindex_raw is not None:
+            try:
+                tabindex = int(tabindex_raw.strip() or "0")
+            except ValueError:
+                tabindex = 0
+            if tabindex < 0:
+                return  # tabindex=-1 只能脚本聚焦，不参与 Tab 导航
+        else:
+            tabindex = 0
+        if not self._focusable(tag, attrs, tabindex_raw is not None):
+            return
+        self.focusables.append((self.order, tabindex))
+
+    @staticmethod
+    def _is_marker(tag: str, attrs: Dict[str, str]) -> bool:
+        if tag == "script":
+            return False
+        if tag == "input":
+            if (attrs.get("type") or "").lower() == "hidden":
+                return attrs.get("name", "").strip().lower() == "cf-turnstile-response"
+            return "data-sitekey" in attrs
+        classes = " " + (attrs.get("class") or "") + " "
+        if " cf-turnstile " in classes or "data-sitekey" in attrs:
+            return True
+        return tag == "iframe" and "challenges.cloudflare.com" in (attrs.get("src") or "")
+
+    @staticmethod
+    def _focusable(tag: str, attrs: Dict[str, str], has_tabindex: bool) -> bool:
+        if tag == "input":
+            return (attrs.get("type") or "text").lower() != "hidden"
+        if tag in {"a", "area"}:
+            return bool(attrs.get("href")) or has_tabindex
+        if tag == "summary":
+            return True
+        if tag in {"audio", "video"}:
+            return "controls" in attrs or has_tabindex
+        if tag in {"iframe", "object", "embed", "button", "select", "textarea"}:
+            return True
+        if (attrs.get("contenteditable") or "").lower() == "true":
+            return True
+        return has_tabindex
+
+
+def tabs_till_turnstile(html: str) -> int:
+    """推算 FlareSolverr ``tabs_till_verify``：widget iframe 前的可聚焦元素数 + 1。
+
+    正整数即 Tab 次数；0 表示页面里找不到 Turnstile 组件（或解析失败），
+    调用方此时应要求用户用 ``flare_tabs`` 手工指定。静态推导看不到 JS 后插入
+    与 CSS 隐藏的元素，页面结构复杂时可手工覆盖。
+    """
+    parser = _FocusOrderParser()
+    try:
+        parser.feed(html or "")
+    except Exception:
+        return 0
+    if not parser.marker:
+        return 0
+    # 正 tabindex 的元素无论在 DOM 哪个位置都排在焦点序最前面
+    positives = sorted((entry for entry in parser.focusables if entry[1] > 0),
+                       key=lambda entry: (entry[1], entry[0]))
+    zeros_before = [entry for entry in parser.focusables
+                    if entry[1] <= 0 and entry[0] < parser.marker]
+    return len(positives) + len(zeros_before) + 1
 
 
 def random_form_fields(html: str) -> Dict[str, str]:

@@ -39,12 +39,28 @@ export default async function ({ page, context }) {
     widgets_visible: lastState.widgets_visible || 0, waf_clicks: wafClicks,
     frame_action: frameAction, click_error: clickError,
     challenge_script: challengeScript, resource_error: resourceError,
+    turnstile_error: lastState.turnstile_error || '',
     visibility: lastState.visibility || 'unknown', focused: lastState.focused,
     requests: signPosts().length, http_status: navigationStatus, auto_action: autoAction,
     error_type: error?.name || '' });
   const failure = (error, exception) => ({ error, diagnostics: diagnostic(exception) });
+  // WAF / 验证类失败附一张现场截图（base64 PNG）：联调脚本落盘定位雷池新版交互。
+  const shotFailure = async (error) => {
+    const base = failure(error);
+    try { base.shot = await page.screenshot({ encoding: 'base64' }); } catch { /* page unavailable */ }
+    return base;
+  };
   const finish = async () => ({ after: await page.content(), ajax, diagnostics: diagnostic() });
   function installDOM() {
+    // Preserve only the widget's error code, never its verification response token.
+    window.__ptsigninTurnstileError = '';
+    addEventListener('message', ({ origin, data }) => {
+      if (origin !== 'https://challenges.cloudflare.com' || !data || typeof data !== 'object') return;
+      if (data.event === 'complete') window.__ptsigninTurnstileError = '';
+      if (data.event === 'fail' && typeof data.code === 'string' && /^\d{6}$/.test(data.code)) {
+        window.__ptsigninTurnstileError = data.code;
+      }
+    });
     const visible = (node) => {
       const rect = node.getBoundingClientRect();
       const style = getComputedStyle(node);
@@ -101,6 +117,7 @@ export default async function ({ page, context }) {
       const lower = text.toLowerCase();
       return {
         visibility: document.visibilityState, focused: document.hasFocus(),
+        turnstile_error: window.__ptsigninTurnstileError || '',
         completed: [...statusWords.success, ...statusWords.already, ...statusWords.defaults]
           .some(word => word && lower.includes(String(word).toLowerCase())),
         kind: waf ? 'waf' : interstitial ? 'cloudflare' : widget ? 'turnstile' : 'none',
@@ -138,30 +155,30 @@ export default async function ({ page, context }) {
       const previous = clickedFrames.get(frame) || { count: 0, at: 0 };
       if (previous.count >= 3 || Date.now() - previous.at < 2500) continue;
       clickedFrames.set(frame, { count: previous.count, at: Date.now() });
+      let checkbox;
       try {
-        const checkbox = await frame.$('input[type="checkbox"]');
+        // Off-screen cross-origin frames may not build their accessibility tree until visible.
+        const element = await frame.frameElement();
+        if (!element) { frameAction = 'missing_element'; continue; }
         try {
-          if (checkbox && await checkbox.boundingBox()) {
-            await checkbox.click();
-          } else {
-            // The checkbox may be inside a closed shadow root. Click only a visible widget frame.
-            const element = await frame.frameElement();
-            if (!element) { frameAction = 'missing_element'; continue; }
-            try {
-              const box = await element.boundingBox();
-              if (!box || box.width < 100 || box.height < 30) { frameAction = 'not_visible'; continue; }
-              // ElementHandle.click scrolls into view before calculating the click position.
-              await element.click({ offset: { x: 30, y: Math.min(32, box.height / 2) } });
-            } finally { await element.dispose(); }
-          }
-          checkboxClicks += 1;
-          frameAction = 'clicked';
-          clickedFrames.set(frame, { count: previous.count + 1, at: Date.now() });
-        } finally { if (checkbox) await checkbox.dispose(); }
+          if (!await element.boundingBox()) { frameAction = 'not_visible'; continue; }
+          await element.evaluate(node => node.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }));
+        } finally { await element.dispose(); }
+        // ARIA uses Chromium's accessibility tree, including closed shadow roots.
+        checkbox = await frame.$('input[type="checkbox"]') || await frame.$('::-p-aria([role="checkbox"])');
+        if (!checkbox) { frameAction = 'waiting_control'; continue; }
+        if (!await checkbox.boundingBox()) { frameAction = 'not_visible'; continue; }
+        if (await checkbox.evaluate(node => node.disabled || node.checked ||
+            node.getAttribute('aria-disabled') === 'true' || node.getAttribute('aria-checked') === 'true')) {
+          frameAction = 'waiting_control'; continue;
+        }
+        await checkbox.click();
+        checkboxClicks += 1;
+        frameAction = 'clicked';
+        clickedFrames.set(frame, { count: previous.count + 1, at: Date.now() });
       } catch (error) {
-        // A challenge can replace its iframe; preserve a bounded reason instead of hiding every failure.
         frameAction = 'error'; clickError = error.name || 'Error';
-      }
+      } finally { if (checkbox) await checkbox.dispose().catch(() => {}); }
     }
   }
 
@@ -403,7 +420,7 @@ export default async function ({ page, context }) {
         await navigate(preflight.href);
         await sleep(Math.min(Number(rule.preflight_wait || 1000), 15000));
         const current = await waitChallenge();
-        if (current.pending) return failure('challenge');
+        if (current.pending) return await shotFailure('challenge');
         if (current.login) return failure('login');
         if (current.completed) return finish();
       }
@@ -412,7 +429,7 @@ export default async function ({ page, context }) {
       await sleep(Math.min(Number(rule.preflight_wait || 1000), 15000));
       stage = 'challenge_before';
       let current = await waitChallenge();
-      if (current.pending) return failure('challenge');
+      if (current.pending) return await shotFailure('challenge');
       if (current.login) return failure('login');
       if (current.completed) return finish();
       if (current.slider) return failure('slider');
@@ -431,7 +448,8 @@ export default async function ({ page, context }) {
       if (['image', 'trigger_image'].includes(rule.mode)) await recognize();
       if (rule.mode === 'altcha') {
         stage = 'altcha';
-        if (!await click(rule.altcha_checkbox_selector)) return failure('altcha');
+        if (!await click(rule.altcha_checkbox_selector))
+          return { ...failure('altcha'), after: await page.content().catch(() => '') };
         const until = Math.min(deadline, Date.now() + 30000);
         let ready = false;
         while (Date.now() < until) {
@@ -463,7 +481,7 @@ export default async function ({ page, context }) {
       current = await waitResult();
       if (current.interstitial || ((current.widget || current.frames) && !current.token && !current.completed)) {
         current = await waitChallenge();
-        if (current.pending) return failure('challenge');
+        if (current.pending) return await shotFailure('challenge');
       }
       if (current.login) return failure('login');
       if (current.slider) return failure('slider');
@@ -476,7 +494,7 @@ export default async function ({ page, context }) {
         current = await waitResult(false, Number(rule.verify_wait || 5000));
         if (current.interstitial || ((current.widget || current.frames) && !current.token && !current.completed)) {
           current = await waitChallenge();
-          if (current.pending) return failure('challenge');
+          if (current.pending) return await shotFailure('challenge');
         }
         if (current.login) return failure('login');
       }

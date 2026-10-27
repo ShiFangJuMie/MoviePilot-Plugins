@@ -43,6 +43,7 @@ def diagnostic_hint(value: Any) -> str:
             parts.append(f"{label}={number}")
     for key, label, choices in (
         ("frame_action", "验证框操作", {"clicked": "已点击", "not_visible": "不可见",
+                                      "waiting_control": "等待可交互复选框",
                                       "missing_element": "未取得元素", "error": "异常"}),
         ("challenge_script", "验证脚本", {"loading": "加载中", "loaded": "已响应", "failed": "加载失败"}),
     ):
@@ -55,6 +56,9 @@ def diagnostic_hint(value: Any) -> str:
         parts.append("页面=" + ("前台" if value["visibility"] == "visible" else "后台"))
     if isinstance(value.get("focused"), bool):
         parts.append("页面焦点=" + ("有" if value["focused"] else "无"))
+    turnstile_error = value.get("turnstile_error")
+    if isinstance(turnstile_error, str) and re.fullmatch(r"\d{6}", turnstile_error):
+        parts.append("Turnstile最近错误码=" + turnstile_error)
     if value.get("click_error") in {"Error", "TypeError", "TimeoutError", "ProtocolError", "TargetCloseError"}:
         parts.append("验证点击异常=" + value["click_error"])
     if value.get("auto_action") in {"callback", "form"}:
@@ -169,6 +173,8 @@ class FunctionSigner:
             return SignResult("failed", "自建浏览器配置无效或 Function 返回了无效 JSON")
         if not isinstance(result, dict):
             return SignResult("failed", "Function 返回格式错误，未取得签到结果")
+        # 诊断辅助：联调脚本用 --save-after 把最终页面落盘（不影响正常流程）
+        self._last_raw = result
         errors = {
             "challenge": "自建浏览器未通过 Cloudflare / Turnstile / WAF 验证，未确认签到",
             "slider": "页面仍要求滑块验证；MoviePilot-OCR 不识别滑块，需要站点专用规则",
@@ -187,6 +193,10 @@ class FunctionSigner:
         hint = diagnostic_hint(diagnostics)
         suffix = "；" + hint if hint else ""
         if result.get("error"):
+            if result["error"] == "challenge" and isinstance(diagnostics, Mapping):
+                code = diagnostics.get("turnstile_error")
+                if isinstance(code, str) and re.fullmatch(r"(?:300|600)\d{3}", code):
+                    return SignResult("failed", "Cloudflare 拒绝了本次浏览器验证，未确认签到" + suffix)
             if (result.get("error") == "challenge" and isinstance(diagnostics, Mapping)
                     and diagnostics.get("challenge_script") == "failed"):
                 return SignResult("failed", "验证脚本加载失败，尚未完成验证，请检查浏览器出口到验证服务的连接" + suffix)

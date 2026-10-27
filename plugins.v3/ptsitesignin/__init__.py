@@ -1,9 +1,11 @@
 """PT 站点签到插件（MoviePilot V2/V3）
 
-双引擎：
+引擎：
   1. HTTP 引擎 —— 直接请求站点签到接口（如 NexusPHP attendance.php），轻量快速；
   2. Browserless 引擎 —— 通过自建 Browserless Function API 打开真实浏览器完成
-     图片验证码、Cloudflare / Turnstile 挑战、弹窗签到与 Altcha 验证。
+     图片验证码、Cloudflare / Turnstile 挑战、弹窗签到与 Altcha 验证；
+  3. FlareSolverr 引擎 —— 用 v3.5+ 官方原生 API（会话 + tabs_till_verify）完成
+     签到表单内嵌的 Turnstile 验证并在同一会话提交（如萝莉 mua.xloli.cc）。
 
 引擎默认按站点规则自动判定；未显式声明引擎的站点在 HTTP 直连撞上 Cloudflare
 或验证码时，会自动改用 Browserless 重试一次（自定义规则显式指定 HTTP 时关闭回退）。
@@ -78,6 +80,7 @@ from .core import (
     target_url,
 )
 from .function import FunctionSigner
+from .flaresolverr import FlareSolverrSigner
 
 def mask_proxy(host: str) -> str:
     """代理地址可能带账号密码，日志里把凭据打码。"""
@@ -175,9 +178,9 @@ PAGE_STYLE = (
 
 class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到（私有部署版）"
-    plugin_desc = "自建 Browserless Function 与 MoviePilot-OCR 签到，保留 HTTP 和本机浏览器，无 Cloud 回退。"
+    plugin_desc = "自建 Browserless Function、FlareSolverr 与 MoviePilot-OCR 签到，保留 HTTP 和本机浏览器，无 Cloud 回退。"
     plugin_icon = "signin.png"
-    plugin_version = "1.9.4"
+    plugin_version = "1.9.5"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -199,6 +202,7 @@ class PTSiteSignIn(_PluginBase):
     _browserless_url = DEFAULT_BROWSERLESS_URL
     _browserless_token = ""
     _browserless_timeout = 120
+    _flaresolverr_url = ""
     _ocr_url = ""
     _browser_proxy = ""
     _site_rules = ""
@@ -240,6 +244,7 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_url = str(config.get("browserless_url") or DEFAULT_BROWSERLESS_URL).strip()
         self._browserless_token = str(config.get("browserless_token") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 120), 300))
+        self._flaresolverr_url = str(config.get("flaresolverr_url") or "").strip()
         self._ocr_url = str(config.get("ocr_url") or "").strip()
         self._browser_proxy = str(config.get("browser_proxy") or "").strip()
         self._site_rules = str(config.get("site_rules") or "")
@@ -314,6 +319,7 @@ class PTSiteSignIn(_PluginBase):
             "browserless_url": self._browserless_url,
             "browserless_token": self._browserless_token,
             "browserless_timeout": self._browserless_timeout,
+            "flaresolverr_url": self._flaresolverr_url,
             "ocr_url": self._ocr_url,
             "browser_proxy": self._browser_proxy,
             "site_rules": self._site_rules,
@@ -433,6 +439,8 @@ class PTSiteSignIn(_PluginBase):
 
         rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
                       '自建浏览器：{"engine":"function","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
+                      'FlareSolverr（v3.5+，内嵌 Turnstile 站点如萝莉）：{"engine":"flaresolverr","path":"/attendance.php"}，'
+                      'Tab 次数自动推算，页面改版后可加 {"flare_tabs": 数值} 手工覆盖；'
                       '旧 engine=browserless 自动使用 Function；'
                       '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
                       '点签到后跳 WAF / Cloudflare 检测页时用 {"wait": 12000} 等它放行；'
@@ -480,6 +488,10 @@ class PTSiteSignIn(_PluginBase):
                 field("VTextField", "browser_proxy", "浏览器出口代理（可选）", 6,
                       type="password", placeholder="http://proxy:7890",
                       hint="由 Browserless 容器连接；留空使用该实例自身出口，不改变 HTTP / 本机浏览器代理",
+                      **{"persistent-hint": True}),
+                field("VTextField", "flaresolverr_url", "FlareSolverr 地址（可选）", 6,
+                      placeholder="http://flaresolverr:8191",
+                      hint="v3.5+ 官方原生 API；内嵌 Turnstile 站点（萝莉）用它签到，留空时这类站点按未配置处理",
                       **{"persistent-hint": True}),
                 field("VTextField", "browserless_timeout", "浏览器任务超时（秒）", 6,
                       type="number", min=15, max=300,
@@ -751,6 +763,19 @@ class PTSiteSignIn(_PluginBase):
                 if signer is None:
                     return SignResult("failed", "未配置自建 Browserless 地址"), "function"
                 return signer.sign(info, rule), "function"
+            if engine == "flaresolverr":
+                # 会话在 signer 内创建并销毁，无跨调用状态，可以按站点惰性构建。
+                if not self._flaresolverr_url:
+                    return SignResult("failed", "未配置 FlareSolverr 地址"), "flaresolverr"
+                try:
+                    # 规则可用 flare_url 指定该站专用的 FlareSolverr 兼容服务
+                    # （如 audiences 走 TRAWL 的 Camoufox 路线）。
+                    flare = FlareSolverrSigner(str(rule.get("flare_url") or self._flaresolverr_url),
+                                               self._browserless_timeout,
+                                               proxy=str(rule.get("flare_proxy") or ""))
+                except ValueError as error:
+                    return SignResult("failed", str(error)), "flaresolverr"
+                return flare.sign(info, rule), "flaresolverr"
             outcome = http_sign_auto(info, rule, timeout=self._timeout,
                                      proxies=self._proxies_for(info))
             if outcome.status == "failed" and self._should_fallback(rule, outcome):

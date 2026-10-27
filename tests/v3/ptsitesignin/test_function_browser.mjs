@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
-const code = await fs.readFile(new URL('../../../plugins.v3/ptsitesignin/function.js', import.meta.url), 'utf8');
+const code = await fs.readFile(process.env.SIGNIN_TEST_FUNCTION || new URL('../../../plugins.v3/ptsitesignin/function.js', import.meta.url), 'utf8');
 const run = (await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`)).default;
 let signs = 0;
 let ocrCalls = 0;
@@ -106,8 +106,9 @@ const pt = http.createServer(async (req, res) => {
       res.statusCode=303; res.setHeader('Location','/signed'); res.end();
     } else if (req.url === '/verify-delayed') {
       res.end(`<body>正在加载…<script>setTimeout(()=>document.body.textContent='${signed ? '今日已签到' : '未签到'}',400)</script></body>`);
-    } else if (['/cf-frame', '/cf-frame-offscreen', '/cf-frame-closed-host'].includes(req.url)) {
-      const frame = '<iframe title="verification" src="https://challenges.cloudflare.com/mock" width="300" height="70" style="border:0"></iframe>';
+    } else if (['/cf-frame', '/cf-frame-offscreen', '/cf-frame-closed-host', '/cf-frame-delayed', '/cf-rejected'].includes(req.url)) {
+      const query = req.url === '/cf-frame-delayed' ? '?delayed=1' : req.url === '/cf-rejected' ? '?rejected=1' : '';
+      const frame = `<iframe title="verification" src="https://challenges.cloudflare.com/mock${query}" width="300" height="70" style="border:0"></iframe>`;
       const widget = req.url === '/cf-frame-closed-host'
         ? `<div id="widget" class="cf-turnstile"></div><script>document.getElementById('widget').attachShadow({mode:'closed'}).innerHTML=${JSON.stringify(frame)};</script>`
         : frame;
@@ -164,9 +165,31 @@ function handleAdapter(handle) {
   } });
 }
 const frameAdapters = new WeakMap();
+async function ariaCheckbox(frame) {
+  // Playwright CSS does not implement Puppeteer's ARIA query; use Chromium's real AX tree.
+  const session = await frame.page().context().newCDPSession(frame);
+  try {
+    const { root } = await session.send('DOM.getDocument');
+    const { nodes } = await session.send('Accessibility.queryAXTree', { nodeId: root.nodeId, role: 'checkbox' });
+    const node = nodes.find(item => !item.ignored && item.backendDOMNodeId);
+    if (!node) return null;
+    const { object } = await session.send('DOM.resolveNode', { backendNodeId: node.backendDOMNodeId });
+    await session.send('Runtime.callFunctionOn', { objectId: object.objectId,
+      functionDeclaration: 'function() { globalThis.__fixtureAXElement = this; }' });
+    const handle = await frame.evaluateHandle(() => {
+      const element = globalThis.__fixtureAXElement;
+      delete globalThis.__fixtureAXElement;
+      return element;
+    });
+    await session.send('Runtime.releaseObject', { objectId: object.objectId });
+    return handleAdapter(handle.asElement());
+  } finally { await session.detach(); }
+}
 function frameAdapter(frame) {
   if (!frameAdapters.has(frame)) frameAdapters.set(frame, new Proxy(frame, { get(target, key) {
     if (key === 'frameElement') return async () => handleAdapter(await target.frameElement());
+    if (key === '$') return async selector => selector === '::-p-aria([role="checkbox"])'
+      ? ariaCheckbox(target) : handleAdapter(await target.$(selector));
     const value = target[key];
     return typeof value === 'function' ? value.bind(target) : value;
   } }));
@@ -199,12 +222,21 @@ try {
     await browserContext.route('**/*', (route) => {
       const url = new URL(route.request().url());
       if (url.href === 'https://challenges.cloudflare.com/turnstile/v0/api.js') return route.abort('timedout');
-      if (url.href === 'https://challenges.cloudflare.com/mock') {
+      if (url.hostname === 'challenges.cloudflare.com' && url.pathname === '/mock') {
         assert.equal(route.request().headers().cookie, undefined);
+        if (url.searchParams.has('rejected')) return route.fulfill({contentType:'text/html',body:
+          `<body>验证失败<script>parent.postMessage({event:'fail',code:'600010'},'*');</script></body>`});
+        const delayed = url.searchParams.has('delayed');
         return route.fulfill({contentType:'text/html',body:`<body style="margin:0"><div id="host"></div><script>
           const shadow=document.getElementById('host').attachShadow({mode:'closed'});
-          shadow.innerHTML='<input type="checkbox" style="position:absolute;left:16px;top:16px;width:28px;height:28px;margin:0">';
-          let clicks=0;shadow.querySelector('input').onclick=()=>{if(++clicks===2)parent.postMessage('fixture-verified','*');};
+          shadow.innerHTML='<span>正在验证…</span>';
+          setTimeout(()=>{
+            shadow.innerHTML='<input type="checkbox" style="position:absolute;left:16px;top:16px;width:28px;height:28px;margin:0">';
+            let clicks=0;shadow.querySelector('input').onclick=event=>{
+              if(++clicks===${delayed ? 1 : 2})parent.postMessage('fixture-verified','*');
+              else event.target.checked=false;
+            };
+          },${delayed ? 6500 : 0});
         </script></body>`});
       }
       return ['localhost', '127.0.0.1'].includes(url.hostname) ? route.continue() : route.abort();
@@ -294,12 +326,21 @@ try {
     assert.match(result.after || '', /今日已签到/); assert.equal(signs, 1);
   });
   for (const name of ['cf-frame', 'cf-frame-offscreen', 'cf-frame-closed-host']) {
-    // Include the full bounded retry window: first revealing an off-screen iframe may consume a click.
+    // Allow time for a rejected checkbox attempt and the bounded retry.
     await scenario(name, {mode:'cloudflare',cloudflare_wait:8}, result => {
       assert.match(result.after || '', /签到成功/); assert.equal(signs, 1);
       assert.ok(result.diagnostics.checkbox_clicks >= 2 && result.diagnostics.checkbox_clicks <= 3);
     });
   }
+  await scenario('cf-frame-delayed', {mode:'cloudflare',cloudflare_wait:9}, result => {
+    assert.match(result.after || '', /签到成功/); assert.equal(signs, 1);
+    assert.equal(result.diagnostics.checkbox_clicks, 1, 'loading spinners must not consume checkbox attempts');
+  });
+  await scenario('cf-rejected', {mode:'cloudflare',cloudflare_wait:0.5}, result => {
+    assert.equal(result.error, 'challenge'); assert.equal(signs, 0);
+    assert.equal(result.diagnostics.turnstile_error, '600010');
+    assert.equal(result.diagnostics.checkbox_clicks, 0);
+  });
   await scenario('slider', {}, (result) => { assert.equal(result.error, 'slider'); assert.equal(signs, 0); });
   await scenario('disabled', {}, (result) => { assert.equal(result.error, 'button'); assert.equal(signs, 0); });
   await scenario('already', {}, (result) => { assert.match(result.after, /今日已签到/); assert.equal(signs, 0); });

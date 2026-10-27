@@ -245,10 +245,18 @@ def test_browser_failure_contains_bounded_diagnostics_without_page_secrets():
     assert "ERR_TIMED_OUT" in outcome.message and "点击雷池确认=1" in outcome.message
     assert "页面=后台" in outcome.message and "页面焦点=无" in outcome.message
     assert "private-fixture-token" not in outcome.message
+    result["diagnostics"]["turnstile_error"] = "private-fixture-token"
+    with patch.object(signer, "_request", return_value=result):
+        assert "private-fixture-token" not in signer.sign(SITE, {"path": "/attendance.php"}).message
     result["error"] = "challenge"
     with patch.object(signer, "_request", return_value=result):
         outcome = signer.sign(SITE, {"path": "/attendance.php"})
     assert outcome.message.startswith("验证脚本加载失败") and "ERR_TIMED_OUT" in outcome.message
+    result["diagnostics"].update(turnstile_error="600010", frame_action="waiting_control", challenge_script="loaded")
+    with patch.object(signer, "_request", return_value=result):
+        outcome = signer.sign(SITE, {"path": "/attendance.php"})
+    assert outcome.message.startswith("Cloudflare 拒绝了本次浏览器验证")
+    assert "Turnstile最近错误码=600010" in outcome.message and "等待可交互复选框" in outcome.message
 
 
 def test_cloudflare_launch_uses_stealth_without_overwriting_explicit_options():
