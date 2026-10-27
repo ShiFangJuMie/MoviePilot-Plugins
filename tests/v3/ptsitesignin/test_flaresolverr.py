@@ -156,18 +156,28 @@ def test_credentials_in_service_url_become_basic_auth_header():
         _ok(ALREADY_PAGE),
         {"status": "ok", "message": "The session has been removed."},
     )
-    captured = {}
-
-    def spying(_self, payload, budget, **kwargs):
-        import urllib.request as _rq
-        return recorder(payload, budget)
-
     with patch.object(FlareSolverrSigner, "_call", recorder):
         result = signer.sign(SITE, _rule())
     assert result.status == "already"
     # 凭据只进入 Authorization 头，不留在端点 URL 里
     assert "user:pa" not in signer.endpoint
     assert signer._basic == base64.b64encode(b"user:pa@ss").decode()
+    # 显式 auth 参数同样生效（URL 未带凭据时）
+    explicit = FlareSolverrSigner("https://flare.example/", 120, auth="user:secret")
+    assert explicit._basic == base64.b64encode(b"user:secret").decode()
+
+
+def test_401_from_basic_auth_reports_clearly_without_retry():
+    signer = FlareSolverrSigner("https://flare.example/", 120, auth="user:wrong")
+    recorder = _Recorder(
+        {"status": "ok", "message": "Session created successfully."},
+        {"status": "error", "message": "401 未授权：服务端 Basic Auth 拒绝，请检查配置的浏览器服务凭据"},
+    )
+    with patch.object(FlareSolverrSigner, "_call", recorder):
+        result = signer.sign(SITE, _rule())
+    assert result.status == "failed"
+    assert "401" in result.message and "凭据" in result.message
+    assert not result.transient  # 明确失败，不进入失败重试队列反复触发 fail2ban
 
 
 def test_full_session_flow_solves_and_posts_once():

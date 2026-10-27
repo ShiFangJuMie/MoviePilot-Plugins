@@ -169,6 +169,9 @@ def main() -> int:
     parser.add_argument("--flare-proxy", default="",
                         help="FlareSolverr 会话级出口代理（与日常浏览器同出口可排除 IP 因素），"
                              "支持 http(s)/socks5 与用户名密码")
+    parser.add_argument("--flare-auth", default=os.environ.get("PTSIGNIN_FLARE_AUTH", "").strip(),
+                        help="浏览器服务 Basic Auth 凭据 user:password（nginx 鉴权场景）；"
+                             "也可用环境变量 PTSIGNIN_FLARE_AUTH")
     parser.add_argument("--tabs", type=int, help="FlareSolverr 引擎：手工覆盖 Tab 按键次数")
     parser.add_argument("--rule-json", default="{}", help="附加规则覆盖，等同插件的自定义站点规则 JSON")
     parser.add_argument("--dry", action="store_true", help="FlareSolverr 引擎：只诊断不求解不提交")
@@ -237,7 +240,8 @@ def main() -> int:
             print(f"FlareSolverr 路线：{args.fs}（签到页={rule['path']}，"
                   f"预热页={rule.get('flare_prime_path') or '自动回退'}）")
             signer = package.flaresolverr.FlareSolverrSigner(
-                args.fs, args.timeout, proxy=str(rule.get("flare_proxy") or ""))
+                args.fs, args.timeout, proxy=str(rule.get("flare_proxy") or ""),
+                auth=args.flare_auth)
             if args.dry:
                 try:
                     return flaresolverr_dry(signer, core, package.flaresolverr, rule,

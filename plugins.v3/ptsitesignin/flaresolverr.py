@@ -86,11 +86,11 @@ def service_url(address: str) -> str:
 class FlareSolverrSigner:
     """在一个 FlareSolverr 会话里完成「带 Cookie 打开 → 解 Turnstile → 提交签到」。"""
 
-    def __init__(self, address: str, timeout: int = 120, proxy: str = ""):
+    def __init__(self, address: str, timeout: int = 120, proxy: str = "", auth: str = ""):
         raw = str(address or "").strip()
         parsed = urllib.parse.urlsplit(raw)
         # https://user:pass@host/ 形式的凭据转成 Basic 头（服务挂在 nginx
-        # Basic Auth 后面时用）；其余校验交给 service_url
+        # Basic Auth 后面时用）；显式 auth="user:pass" 参数亦可，URL 内嵌优先
         self._basic = ""
         if parsed.username:
             self._basic = base64.b64encode(
@@ -98,6 +98,8 @@ class FlareSolverrSigner:
                 f"{urllib.parse.unquote(parsed.password or '')}".encode()).decode()
             raw = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1],
                                            parsed.path, parsed.query, parsed.fragment))
+        elif str(auth or "").strip():
+            self._basic = base64.b64encode(str(auth).strip().encode()).decode()
         self.endpoint = service_url(raw)
         # 求解调用内部按 ~10 秒一轮重试（暂停 5 秒 + Tab 串 + 等响应）。
         # 单次求解预算封顶 75 秒：命中复选框通常 30 秒内完成，而 Cloudflare 隧道
@@ -141,6 +143,11 @@ class FlareSolverrSigner:
             with opener.open(request, timeout=budget + 20) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
+            if error.code == 401:
+                # 明确失败且绝不重试：服务端 Basic Auth 拒绝凭据——
+                # 反复重试会触发 fail2ban 把出口 IP 拉黑
+                return {"status": "error", "message": "401 未授权：服务端 Basic Auth 拒绝，"
+                        "请检查配置的浏览器服务凭据"}
             # 求解失败（如 Tab 次数没落在复选框上）时 bottle 以 500 返回 JSON 错误体。
             body = error.read().decode("utf-8", "replace")
             try:

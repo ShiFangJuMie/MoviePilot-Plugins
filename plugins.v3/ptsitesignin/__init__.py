@@ -203,6 +203,7 @@ class PTSiteSignIn(_PluginBase):
     _browserless_token = ""
     _browserless_timeout = 120
     _flaresolverr_url = ""
+    _flare_auth = ""
     _ocr_url = ""
     _browser_proxy = ""
     _site_rules = ""
@@ -245,6 +246,7 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_token = str(config.get("browserless_token") or "").strip()
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 120), 300))
         self._flaresolverr_url = str(config.get("flaresolverr_url") or "").strip()
+        self._flare_auth = str(config.get("flare_auth") or "").strip()
         self._ocr_url = str(config.get("ocr_url") or "").strip()
         self._browser_proxy = str(config.get("browser_proxy") or "").strip()
         self._site_rules = str(config.get("site_rules") or "")
@@ -320,6 +322,7 @@ class PTSiteSignIn(_PluginBase):
             "browserless_token": self._browserless_token,
             "browserless_timeout": self._browserless_timeout,
             "flaresolverr_url": self._flaresolverr_url,
+            "flare_auth": self._flare_auth,
             "ocr_url": self._ocr_url,
             "browser_proxy": self._browser_proxy,
             "site_rules": self._site_rules,
@@ -492,6 +495,11 @@ class PTSiteSignIn(_PluginBase):
                 field("VTextField", "flaresolverr_url", "FlareSolverr 地址（可选）", 6,
                       placeholder="http://flaresolverr:8191",
                       hint="v3.5+ 官方原生 API；内嵌 Turnstile 站点（萝莉）用它签到，留空时这类站点按未配置处理",
+                      **{"persistent-hint": True}),
+                field("VTextField", "flare_auth", "浏览器服务 Basic Auth（可选）", 6,
+                      type="password", placeholder="user:password",
+                      hint="FlareSolverr / TRAWL 挂在 nginx Basic Auth 后面时填写；"
+                           "对所有 FlareSolverr 兼容端点生效，401 立即报错不重试",
                       **{"persistent-hint": True}),
                 field("VTextField", "browserless_timeout", "浏览器任务超时（秒）", 6,
                       type="number", min=15, max=300,
@@ -769,10 +777,13 @@ class PTSiteSignIn(_PluginBase):
                     return SignResult("failed", "未配置 FlareSolverr 地址"), "flaresolverr"
                 try:
                     # 规则可用 flare_url 指定该站专用的 FlareSolverr 兼容服务
-                    # （如 audiences 走 TRAWL 的 Camoufox 路线）。
+                    # （如 audiences 走 TRAWL 的 Camoufox 路线）。三个浏览器服务
+                    # 都挂在同一套 nginx Basic Auth 后面：flare_auth 配置
+                    # "user:pass" 后对所有 FlareSolverr 兼容端点生效。
                     flare = FlareSolverrSigner(str(rule.get("flare_url") or self._flaresolverr_url),
                                                self._browserless_timeout,
-                                               proxy=str(rule.get("flare_proxy") or ""))
+                                               proxy=str(rule.get("flare_proxy") or ""),
+                                               auth=self._flare_auth)
                 except ValueError as error:
                     return SignResult("failed", str(error)), "flaresolverr"
                 return flare.sign(info, rule), "flaresolverr"

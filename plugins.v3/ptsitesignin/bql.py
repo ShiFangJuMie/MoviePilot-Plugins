@@ -202,7 +202,14 @@ class BQLSigner:
                 break
             except urllib.error.HTTPError as exc:
                 if exc.code in {401, 403}:
-                    return SignResult("failed", f"Browserless Cloud 鉴权失败（HTTP {exc.code}），请检查 API Token")
+                    body = exc.read().decode("utf-8", "replace")
+                    detail = body[:120].replace("\n", " ") if body.startswith("{") else \
+                        re.sub(r"<[^>]+>", " ", body)[:120].strip()
+                    where = urllib.parse.urlsplit(url)
+                    return SignResult("failed",
+                                      f"Browserless Cloud 鉴权失败（HTTP {exc.code}，"
+                                      f"{where.netloc}{where.path}），请检查 API Token"
+                                      + (f"；响应：{detail}" if detail else ""))
                 if exc.code == 429:
                     return SignResult("failed", "Browserless Cloud 额度不足或请求过于频繁（HTTP 429）")
                 if exc.code >= 500 and attempt < attempts:
