@@ -251,32 +251,22 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
     },
-    # ---- Piggo（piggo.me）：本机 Playwright（家宽出口与登录浏览器同 IPv4）----
-    # 2026-10-28 判别定论：猪猪的 web 会话（pigo_np_web_session）按**精确出口 IP**校验——
-    # 用户的 Edge 走家宽 IPv4（<REDACTED-HOME-IP>），会话绑在该地址上；经家庭 Clash 代理的
-    # 远程浏览器对 piggo.me（CF 有 AAAA）会拨 IPv6（240e:...），IP 不一致 → 应用层 302
-    # 回登录页（CF 与雷池两层均放行也不行）。上游对猪猪用本机 Playwright 正是因为
-    # 本机出口 = 家宽 v4 = Edge 同款 IP（其"异地登录"对机房 IP 也另有限制）。
-    # 因此本插件把猪猪预设对齐上游：engine=playwright + cookie_mode=browser。
-    # 若要走远程浏览器（如 CloakBrowser），须先让家宽 Clash 对 piggo.me 拨 IPv4
-    # （direct 出站 ip-version: ipv4 或 hosts 固定 A 记录），使出口回到 <REDACTED-HOME-IP>。
+    # ---- Piggo（piggo.me）：CloakBrowser 远程路线（2026-10-28 实测签到成功）----
+    # 三个必要条件（缺一不可，详见 cloak.py 模块头与 README）：
+    # 1. 站点 Cookie 必须新鲜整串（cf_clearance + sl-* + 会话）——站点在新登录时
+    #    轮换会话令牌，旧串立即失效（换浏览器重登 = 旧 Cookie 作废）；
+    # 2. 实例出口 IP 与登录浏览器一致：家宽 Clash 需对 piggo.me 拨 IPv4
+    #    （hosts 钉 A 记录，用 piggo.me/cdn-cgi/trace 验证），否则会话按精确 IP 判游客；
+    # 3. UA 与签发 Cookie 的浏览器同族（默认 Chrome；站点管理设了 UA 则优先）。
+    # 不想用远程服务时，可自定义规则 {"engine":"playwright"} 走 MoviePilot 本机
+    # 浏览器（出口同为家宽 v4 时上游实证可用）。
     "piggo.me": {
-        "engine": "playwright",
-        "cookie_mode": "browser",
-        "method": "GET",
-        # 云盾 / 雷池检测页多等一会儿（Playwright 引擎按这个预算轮询放行）
-        "cloudflare_wait": 40,
+        "engine": "cloak",
         "path": "/attendance.php",
-        "retry_paths": ["/index.php"],
-        "submit_method": "dom_click",
-        "submit_selector": "a, input[type='submit'], button, [role='button'], span",
-        "submit_text": "签到",
-        "wait": 15000,
-        "pending_keywords": ["正在进行安全检测", "安全检测", "正在验证您是否是真人"],
         # 照 tmzg 的做法：按钮消失不算成功，只认站点给的明确文字；
         # 已签到只看这几个（「已领取」是别的站点文案，容易误判）
-        "success_keywords": ["签到成功", "簽到成功", "签到完成", "本次签到"],
-        "already_keywords": ["今日已签到", "今天已签到", "已簽到"],
+        "success_keywords": ["签到成功", "簽到成功", "签到完成", "本次签到", "获得"],
+        "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "明日"],
     },
     # ---- 以下站点流程参考 thsrite「站点自动签到」的 sites/ 模块 ----
     # 只收录能用规则表达的：POST 固定字段、首页抓 CSRF、JSON 返回判定这几种。
@@ -631,10 +621,10 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
     # Old browserless rules keep working, but always use our self-hosted Function backend.
     if rule["engine"] == "browserless":
         rule["engine"] = "function"
-    if rule["engine"] not in {"http", "function", "playwright", "flaresolverr", "bql", "fox"}:
-        raise ValueError("签到引擎只能是 http、function、flaresolverr、bql、fox 或 playwright（兼容 browserless 别名）")
+    if rule["engine"] not in {"http", "function", "playwright", "flaresolverr", "bql", "fox", "cloak"}:
+        raise ValueError("签到引擎只能是 http、function、flaresolverr、bql、fox、cloak 或 playwright（兼容 browserless 别名）")
     rule["auto_fallback"] = not user_engine
-    if rule["engine"] in {"http", "playwright", "flaresolverr"}:
+    if rule["engine"] in {"http", "playwright", "flaresolverr", "cloak"}:
         rule.setdefault("path", DEFAULT_HTTP_PATH)
         rule.setdefault("success", DEFAULT_SUCCESS_PATTERN)
         rule.setdefault("already", DEFAULT_ALREADY_PATTERN)
@@ -648,7 +638,7 @@ def resolve_rule(site: Mapping[str, Any], custom_rules: Mapping[str, Mapping[str
 
 def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
     result = dict(rule)
-    if result["engine"] in {"http", "playwright", "flaresolverr"}:
+    if result["engine"] in {"http", "playwright", "flaresolverr", "cloak"}:
         path = str(result.get("path") or "")
         if not path.startswith("/") or path.startswith("//"):
             raise ValueError("签到路径必须是以 / 开头的站内路径")

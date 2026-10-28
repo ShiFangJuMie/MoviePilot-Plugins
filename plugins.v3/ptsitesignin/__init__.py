@@ -204,6 +204,8 @@ class PTSiteSignIn(_PluginBase):
     _browserless_timeout = 120
     _flaresolverr_url = ""
     _flare_auth = ""
+    _cloak_url = ""
+    _cloak_proxy = ""
     _ocr_url = ""
     _browser_proxy = ""
     _site_rules = ""
@@ -247,6 +249,8 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 120), 300))
         self._flaresolverr_url = str(config.get("flaresolverr_url") or "").strip()
         self._flare_auth = str(config.get("flare_auth") or "").strip()
+        self._cloak_url = str(config.get("cloak_url") or "").strip()
+        self._cloak_proxy = str(config.get("cloak_proxy") or "").strip()
         self._ocr_url = str(config.get("ocr_url") or "").strip()
         self._browser_proxy = str(config.get("browser_proxy") or "").strip()
         self._site_rules = str(config.get("site_rules") or "")
@@ -323,6 +327,8 @@ class PTSiteSignIn(_PluginBase):
             "browserless_timeout": self._browserless_timeout,
             "flaresolverr_url": self._flaresolverr_url,
             "flare_auth": self._flare_auth,
+            "cloak_url": self._cloak_url,
+            "cloak_proxy": self._cloak_proxy,
             "ocr_url": self._ocr_url,
             "browser_proxy": self._browser_proxy,
             "site_rules": self._site_rules,
@@ -443,6 +449,7 @@ class PTSiteSignIn(_PluginBase):
         rules_hint = ('键为域名或站点 ID。HTTP：{"path":"/attendance.php","success":"正则","already":"正则"}；'
                       '自建浏览器：{"engine":"function","mode":"cloudflare|image|trigger_image|altcha|open_page", ...}；'
                       'FlareSolverr（v3.5+，内嵌 Turnstile 站点如萝莉）：{"engine":"flaresolverr","path":"/attendance.php"}，'
+                      'CloakBrowser（反检测 Chromium，雷池站点如猪猪）：{"engine":"cloak","path":"/attendance.php"}；'
                       'Tab 次数自动推算，页面改版后可加 {"flare_tabs": 数值} 手工覆盖；'
                       '旧 engine=browserless 自动使用 Function；'
                       '页面内嵌 Turnstile、验证通过后由站点自己提交（如观众）用 {"submit_method":"auto"}；'
@@ -498,8 +505,18 @@ class PTSiteSignIn(_PluginBase):
                       **{"persistent-hint": True}),
                 field("VTextField", "flare_auth", "浏览器服务 Basic Auth（可选）", 6,
                       type="password", placeholder="user:password",
-                      hint="FlareSolverr / TRAWL 挂在 nginx Basic Auth 后面时填写；"
-                           "对所有 FlareSolverr 兼容端点生效，401 立即报错不重试",
+                      hint="FlareSolverr / TRAWL / CloakBrowser 挂在 nginx Basic Auth 后面时填写；"
+                           "对所有 FlareSolverr 兼容端点与 CloakBrowser 端点生效，401 立即报错不重试",
+                      **{"persistent-hint": True}),
+                field("VTextField", "cloak_url", "CloakBrowser 地址（可选，猪猪用）", 6,
+                      placeholder="https://cloak.example.com",
+                      hint="cloakserve 的 CDP 服务根地址，凭据可内嵌（https://user:pass@host/）；"
+                           "猪猪等雷池站点的远程签到走它",
+                      **{"persistent-hint": True}),
+                field("VTextField", "cloak_proxy", "CloakBrowser 实例出口代理（可选）", 6,
+                      type="password", placeholder="http://proxy:7890",
+                      hint="浏览器实例经它出网；会话按精确 IP 校验的站点（猪猪）必须与登录浏览器同出口"
+                           "（家宽代理需让目标域拨 IPv4）",
                       **{"persistent-hint": True}),
                 field("VTextField", "browserless_timeout", "浏览器任务超时（秒）", 6,
                       type="number", min=15, max=300,
@@ -787,6 +804,16 @@ class PTSiteSignIn(_PluginBase):
                 except ValueError as error:
                     return SignResult("failed", str(error)), "flaresolverr"
                 return flare.sign(info, rule), "flaresolverr"
+            if engine == "cloak":
+                # CloakBrowser（cloakserve CDP）：反检测 Chromium，雷池站点的远程路线。
+                # 鉴权复用 flare_auth（浏览器服务共用一套 nginx Basic Auth），地址内嵌凭据优先。
+                if not self._cloak_url:
+                    return SignResult("failed", "未配置 CloakBrowser 地址"), "cloak"
+                from .cloak import cloak_sign
+                return cloak_sign(info, rule, timeout=self._browserless_timeout,
+                                  endpoint=self._cloak_url,
+                                  proxy=str(rule.get("cloak_proxy") or self._cloak_proxy),
+                                  auth=self._flare_auth, logger=logger), "cloak"
             outcome = http_sign_auto(info, rule, timeout=self._timeout,
                                      proxies=self._proxies_for(info))
             if outcome.status == "failed" and self._should_fallback(rule, outcome):

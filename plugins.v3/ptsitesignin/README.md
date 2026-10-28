@@ -11,6 +11,8 @@
 | 自建 Browserless 地址 | 根地址，例如 `http://browserless:3000`，或完整 `/chromium/function` 地址 |
 | 自建 Browserless Token | 自建实例的 Token，通过 `Authorization: Bearer` 发送；未设置鉴权的实例可留空 |
 | FlareSolverr 地址 | 可选，v3.5+ 官方版根地址，例如 `http://flaresolverr:8191`；内嵌 Turnstile 站点（萝莉）用它签到 |
+| CloakBrowser 地址 | 可选，cloakserve CDP 服务根地址（凭据可内嵌 `https://user:pass@host/`，或复用 Basic Auth 配置）；猪猪等雷池站点走它 |
+| CloakBrowser 出口代理 | 可选，浏览器实例经它出网；会话按精确 IP 校验的站点（猪猪）必须与登录浏览器同出口（家宽代理需让目标域拨 IPv4） |
 | MoviePilot-OCR 地址 | 根地址，例如 `http://moviepilot-ocr:9899`，或完整 `/captcha/base64` 地址 |
 | 浏览器出口代理 | 可选，例如 `http://proxy:7890`；由 Browserless 容器连接，留空使用它自身的出口 |
 | 浏览器任务超时 | 默认 120 秒，可按站点验证耗时调整到 180 秒；实例自身也必须允许对应时长 |
@@ -27,6 +29,7 @@ OCR 使用 [jxxghp/MoviePilot-OCR](https://github.com/jxxghp/MoviePilot-OCR) 的
 - `engine: function`：自建浏览器。旧的 `engine: browserless` 规则仍可使用，自动映射到 Function。
 - `engine: playwright`：MoviePilot 本机浏览器；本机助手不可用时，使用已配置的自建 Function。
 - `engine: flaresolverr`：v3.5+ 官方 FlareSolverr 的原生会话，专用于「签到表单内嵌 Turnstile」的站点（萝莉 `mua.xloli.cc` 内置此预设）。
+- `engine: cloak`：远程 CloakBrowser（cloakserve CDP，反检测 Chromium）。MoviePilot 自带 playwright 直接 `connect_over_cdp`，实例经「CloakBrowser 出口代理」出网；401 / 4xx 立即报错不重试（防 fail2ban），实例崩溃自动换 seed 重试一次，雷池交互挑战的「确认」按钮自动点击。猪猪 `piggo.me` 内置此预设。
 
 ### FlareSolverr 引擎（萝莉）
 
@@ -39,7 +42,7 @@ OCR 使用 [jxxghp/MoviePilot-OCR](https://github.com/jxxghp/MoviePilot-OCR) 的
 - **严格提交条件**：没有取得 `turnstile_token` 绝不发签到请求；已签到 / Cookie 失效（跳登录页）/ 停在检测页都会在提交前明确报告。
 - 部署要求：FlareSolverr 自身出口须符合站点预期（同代理段）；建议 `LANG=en-US`。求解调用的超时上限 90 秒（命中复选框通常 30 秒内完成），HTTP 500 的错误体会被解析成可读原因。
 
-猪猪（`piggo.me`）默认使用 `engine: playwright`（MoviePilot 本机浏览器，出口即 MoviePilot 所在网络的出口）+ `cookie_mode: browser`：打开 `attendance.php`（`retry_paths` 里带 `/index.php` 兜底），等云盾 / 雷池检测页放行后按文字点「签到」。**为什么必须本机出口**：猪猪的 web 会话（`pigo_np_web_session`）按精确出口 IP 校验——会话在哪台设备 / 哪个 IP 下登录，就只认那个 IP；远程浏览器服务即使带上完整 Cookie，只要出口 IP 不同（典型：经代理对 piggo.me 拨了 IPv6，而登录浏览器走家宽 IPv4），应用层就会 302 回登录页。Cloudflare 与雷池两层放行都不受此影响。旧的自定义规则若固定了 `engine: function`（Browserless），猪猪会被「正在被调试」阻断页拦截，建议删除该自定义规则让预设生效。Sunny 默认使用 Function，等待异步签到卡片与可用按钮出现，不把日历图例里的“已签到”算作今日完成。
+猪猪（`piggo.me`）默认使用 `engine: cloak`（远程 CloakBrowser，反检测 Chromium，雷池挑战唯一放行的远程内核）：打开 `attendance.php`，等 Cloudflare / 雷池放行（交互挑战的「确认」按钮自动点），站点「打开即签」自动完成，按站点文案判定结果。**生产三要素（2026-10-28 实测打通，缺一不可）**：①站点 Cookie 用新鲜整串（`cf_clearance` + `sl-*` + 会话）——站点在新登录时轮换会话令牌，换浏览器重登后旧 Cookie 立即失效；②实例出口 IP 与登录浏览器一致——家宽 Clash 需对 `piggo.me` 钉 IPv4（`hosts: {'piggo.me': <A记录>}`，用 `piggo.me/cdn-cgi/trace` 验证 `ip=` 为家宽 v4），否则会话按精确 IP 判游客；③UA 与签发 Cookie 的浏览器同族（引擎默认 Chrome 155 / macOS，站点管理里设了 UA 则优先）。不想用远程服务时，自定义规则 `{"engine":"playwright"}` 走 MoviePilot 本机浏览器（出口同为家宽 v4 时可用，上游即此做法）。Sunny 默认使用 Function，等待异步签到卡片与可用按钮出现，不把日历图例里的“已签到”算作今日完成。
 
 观众（`audiences.me`）与 OurBits（`ourbits.club`）默认使用 `engine: flaresolverr`：两站访客访问都会先出 Cloudflare「Just a moment」整页挑战（预热时由 FlareSolverr 原生解掉、`cf_clearance` 留在会话内），观众签到表单里还有内嵌 Turnstile，与萝莉同款 `tabs_till_verify` 求解 + 同会话提交。观众如需回退旧的 Function+auto 路线，在自定义规则里写 `{"engine":"function","mode":"cloudflare","submit_method":"auto"}`。0ff（`0ff.cc` / `pt.0ff.cc`）的滑块由 `sites/farm.py` 直连 `slide_check` 脚本里的验证接口完成，不消耗浏览器。
 
@@ -66,7 +69,7 @@ Function 引擎建议将浏览器任务总超时设为 180 秒；各阶段共用
 - OCR 当前识别六位大写字母和数字，不能识别滑块、海报选图或 Turnstile。
 - 普通 Chromium 能否通过 Cloudflare 取决于站点验证和实例出口。此版本没有付费 solve 等价能力，未通过会明确失败，不把点击或 HTTP 200 当作成功。
 - **观众（audiences.me）走 TRAWL（Camoufox）专用路线**：官方 FlareSolverr 浏览器被该站 sitekey 指纹拒绝（组件停在 Verifying 死循环），Browserless 也被 600010 拒绝；改用 TRAWL 的 FlareSolverr 兼容 `/v1`（预设 `flare_url` 指向 TRAWL 实例）并启用其 `solveEmbeddedCaptchas` 扩展解内嵌组件，2026-10-27 实测签到成功。TRAWL 部署见 [germondai/trawl](https://github.com/germondai/trawl)，需能被 MoviePilot 访问。
-- **猪猪（piggo.me）会话按精确出口 IP 校验（2026-10-28 判别定论）**：把 Edge 的完整 Cookie 连同完全一致的 UA / sec-ch-ua 客户端提示 / Accept-Language / 相同家宽出口移植到远程浏览器（CloakBrowser，经家庭 Clash 代理）后，Cloudflare（借用的 cf_clearance 被接受）与雷池（挑战通过、接受注入的 sl-session）两层都放行，应用层仍 302 回登录页——因为 Clash 对 piggo.me（CF 有 AAAA 记录）拨 **IPv6**（`piggo.me/cdn-cgi/trace` 实证 ip=240e:...），而登录浏览器（Edge）走家宽 **IPv4**，会话绑定的精确 IP 对不上。原生 NexusPHP 的 Cookie 校验本是无绑定的 HMAC(user_id+expires)（本地源码核对），猪猪 fork 在其上叠加了 IP 校验。**推论**：①本机 Playwright 引擎（出口=MoviePilot 所在网络）与 Edge 同源时可用——这是上游对猪猪的既定做法，本插件预设已对齐；②远程浏览器路线要可用，须先让代理链对 piggo.me 拨 IPv4（如 Clash 的 direct 出站 `ip-version: ipv4` 或 hosts 固定 A 记录），用 `piggo.me/cdn-cgi/trace` 验证出口回到登录时的 IPv4；③用 myip.ipip.net 之类的旁站测「代理是否生效 / 家族是否一致」不可靠（其 AAAA 可用性会变，同一代理今天 v4 明天 v6）——判 IP 必须用目标站自己的 CF trace。另：雷池对无 stealth 的 CDP 浏览器（含真实 Edge）会给「当前环境正在被调试」阻断，Browserless 与 FlareSolverr/TRAWL 在猪猪上各有反调试 / 按钮不渲染的拦截，CloakBrowser 是唯一能过雷池的远程引擎。
+- **猪猪（piggo.me）远程路线已打通（2026-10-28，`engine: cloak` 实测签到成功）**。此前"四引擎全灭"是两个独立因素的叠加，均已定位并解决：①家庭 Clash 对 piggo.me（CF 有 AAAA）拨 **IPv6**，而登录浏览器走家宽 **IPv4**，猪猪会话按精确出口 IP 校验 → 应用层 302（用 `piggo.me/cdn-cgi/trace` 实证，已用 Clash `hosts` 钉 A 记录解决；用 myip 之类的旁站测出口家族不可靠，其 AAAA 可用性会变）；②站点在新登录时**轮换会话令牌**——换浏览器重登后旧 `pigo_np_web_session` 立即失效，测试用的旧 Cookie 全部已死。Cloudflare 借用的 `cf_clearance` 可跨浏览器复用（UA 同族即可）；雷池挑战 CloakBrowser 自动通过（「确认」按钮自动点）；Browserless（无头）与真实 Edge 被雷池反调试拦（「正在被调试」），FlareSolverr/TRAWL 连确认按钮都不渲染——CloakBrowser 是唯一能过雷池的远程内核。运维注意：MoviePilot 站点管理里的猪猪 Cookie 要保持新鲜整串；在其它浏览器重登猪猪会使它立即失效，需重新粘贴。
 - 农场 HTTP 模块复用 Cookie 会话，保存验证接口下发的新 Cookie；如果页面仍要求滑块，报告需要专用适配。
 - 天空的 HTTP/OCR 模块和浏览器图片模式均使用配置的自建 OCR。北洋保留原海报比对模块。
 - Sunny 使用自建 Browserless 或其浏览器代理的出口，仍需符合站点的异地登录校验；真实的登录页或二级验证页面会报告失败。

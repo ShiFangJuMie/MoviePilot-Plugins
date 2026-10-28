@@ -208,15 +208,11 @@ def test_self_hosted_configuration_round_trips_and_is_exposed_in_form():
         plugin.stop_service()
 
 
-def test_piggo_preset_uses_local_browser_with_cookie_jar_and_retry_paths():
-    # 猪猪会话按精确出口 IP 校验：预设必须走本机 Playwright（家宽出口与登录浏览器同源），
-    # Cookie 写入浏览器存储（验证中下发的新 Cookie 能随后续请求发出），并带备用页面。
+def test_piggo_preset_uses_cloak_engine():
+    # 猪猪远程路线 = CloakBrowser（雷池反调试唯一放行的远程内核），详见 test_cloak.py
     rule = core.resolve_rule({"url": "https://piggo.me"}, {})
-    assert rule["engine"] == "playwright"
-    assert rule["cookie_mode"] == "browser"
+    assert rule["engine"] == "cloak"
     assert rule["path"] == "/attendance.php"
-    assert "/index.php" in list(rule.get("retry_paths") or [])
-    assert core.playwright_paths(rule)[0] == "/attendance.php"
 
 
 def test_retry_paths_must_be_site_internal():
