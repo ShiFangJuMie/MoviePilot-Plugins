@@ -210,6 +210,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # 未登录时签到页 404、首页断连，Cookie 只能写在 login.php 这样的真实页面上
         "flare_prime_path": "/login.php",
         "submit_text": "签到",
+        # 已签状态的站点文案：用户栏显示「[今日签到，得到魔力加成]」（2026-10-28 CloakBrowser
+        # 试探实测），默认正则匹配不到——补上后 FlareSolverr / cloak 两引擎都能正确判 already
+        "already_keywords": ["今日已签到", "已经签到", "今日签到，得到魔力加成"],
     },
     "share.ilolicon.com": {
         "engine": "function",

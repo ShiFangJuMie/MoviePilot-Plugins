@@ -151,6 +151,7 @@ def _attempt_once(sync_playwright, site: Mapping[str, Any], rule: Mapping[str, A
             submits = 0
             turnstile = 0
             failures = 0
+            hint = ""
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
@@ -163,6 +164,12 @@ def _attempt_once(sync_playwright, site: Mapping[str, Any], rule: Mapping[str, A
                     if failures >= 6:
                         break
                     continue
+                if not hint and html:
+                    # 记录首个页面标题，超时时能看出停在验证页还是站点页
+                    import re as _re
+                    found = _re.search(r"<title>([^<]*)</title>", html)
+                    if found and found.group(1).strip():
+                        hint = found.group(1).strip()[:60]
                 judged = classify(html, rule)
                 if judged.status in {"success", "already"}:
                     return judged
@@ -205,8 +212,8 @@ def _attempt_once(sync_playwright, site: Mapping[str, Any], rule: Mapping[str, A
                             except Exception:
                                 pass
                             break
-            return SignResult("failed", f"CloakBrowser {timeout} 秒内未确认签到结果"
-                                        "（多半停在 Cloudflare / 雷池验证页）")
+            detail = f"（页面停在 {hint!r}）" if hint else "（多半停在 Cloudflare / 雷池验证页）"
+            return SignResult("failed", f"CloakBrowser {timeout} 秒内未确认签到结果{detail}")
         finally:
             try:
                 browser.close()
