@@ -80,6 +80,15 @@ def test_piggo_preset_uses_cloak_engine():
     assert rule["success_keywords"]
 
 
+def test_sunny_preset_uses_cloak_engine():
+    # Sunny 2026-10-28 迁移：cloak 引擎实测真签成功，自建 Browserless 不再有预设用户
+    rule = core.resolve_rule({"url": "https://sunnypt.top"}, {})
+    assert rule["engine"] == "cloak"
+    assert rule["path"] == "/user/attendance"
+    assert rule["submit_method"] == "dom_click"
+    assert rule["submit_text"] == "立即签到"
+
+
 def test_split_basic_auth_prefers_url_credentials():
     address, basic = cloak_mod.split_basic_auth("https://cdp:secret@12730.example.com/")
     assert address == "https://12730.example.com"

@@ -416,11 +416,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
     # 头像菜单里的「每日签到」只是跳这个页面，不用再点菜单；
     # 已签到时页面上是「今日签到已完成 … 已连续签到 N 天」，按钮变灰的「今日已签到」。
     "sunnypt.top": {
-        # 签到卡片异步加载；使用自建浏览器和其代理出口，等待可用按钮出现。
-        "engine": "function",
-        "mode": "open_page",
-        "cookie_mode": "browser",
-        "button_wait": 20000,
+        # 2026-10-28 迁移到 CloakBrowser（engine=cloak 实测真签成功）：
+        # 站点无反自动化门槛，自建 Browserless 已无预设用户；cloak 引擎自带
+        # dom_click 两段式点击，签到卡片异步加载由轮询预算覆盖。
+        "engine": "cloak",
         "method": "GET",
         "path": "/user/attendance",
         "submit_method": "dom_click",
@@ -430,11 +429,10 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # Cookie 失效时站点会 302 到 /auth/sign-in?shouldClearAuth=true：
         # core 的 login_page() 已能识别，会直接报「Cookie 可能失效」而不是误报签到失败
         # 站点是 Next.js + WebSocket 推状态：点完页面要等接口/推送回来才变成「今日签到已完成」，
-        # 所以多留一点时间再读快照（8 秒）
-        "wait": 8000,
+        # 所以判定靠轮询等状态词出现。
         # 不能用「点到就算成功」：已签到时按钮是灰的「今日已签到」，照样能被点到，
         # 于是天天误报签到成功。这里改成看页面状态：
-        # 点之前就有「今日已签到」= 已签到（插件会先探一次，不会瞎点）；
+        # 点之前就有「今日已签到」= 已签到（引擎先判状态再点）；
         # 点之后出现「今日签到已完成 / 已连续签到 N 天」= 本次签到成功。
         "success_keywords": ["本次获得", "签到成功"],
         # 日历图例里也有裸「已签到」，不能据此认定今天已签到。
