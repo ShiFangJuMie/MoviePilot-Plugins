@@ -81,7 +81,7 @@ from .core import (
     target_url,
 )
 from .function import FunctionSigner
-from .flaresolverr import FlareSolverrSigner
+from .flaresolverr import FlareSolverrSigner, sweep_stale_sessions
 
 def mask_proxy(host: str) -> str:
     """代理地址可能带账号密码，日志里把凭据打码。"""
@@ -181,7 +181,7 @@ class PTSiteSignIn(_PluginBase):
     plugin_name = "PT站点签到（私有部署版）"
     plugin_desc = "自建 Browserless Function、FlareSolverr 与 MoviePilot-OCR 签到，保留 HTTP 和本机浏览器，无 Cloud 回退。"
     plugin_icon = "signin.png"
-    plugin_version = "1.9.6"
+    plugin_version = "1.9.7"
     plugin_author = "qingyukb"
     author_url = "https://blog.qyus.cn"
     plugin_config_prefix = "ptsignin_"
@@ -1103,8 +1103,35 @@ class PTSiteSignIn(_PluginBase):
                 return value
         return ""
 
+    def _sweep_flare_sessions(self, infos: List[Dict[str, Any]],
+                              rules: Dict[str, Dict[str, Any]]) -> None:
+        """开跑前清理各 FlareSolverr 兼容端点上残留的本插件会话。
+
+        前一轮超时中断时 sessions.destroy 排在服务端卡死的操作后面执行
+        不到，会话与浏览器进程会留在服务端累积（FlareSolverr / TRAWL 都是
+        单线程服务，积到一定程度就把整台服务拖僵）。清理只认 ptsitesignin
+        自己创建的会话（ptsignin- 前缀），失败静默——服务僵死时靠重启，
+        不靠这里。
+        """
+        if not self._flaresolverr_url:
+            return
+        endpoints: List[str] = []
+        for info in infos:
+            try:
+                rule = resolve_rule(info, rules)
+            except ValueError:
+                continue
+            if str(rule.get("engine")) != "flaresolverr":
+                continue
+            address = flare_service_address(rule, self._flaresolverr_url, self._trawl_url)
+            if address and address not in endpoints:
+                endpoints.append(address)
+        for address in endpoints:
+            sweep_stale_sessions(address, auth=self._flare_auth, logger=logger)
+
     def _run_batch(self, infos: List[Dict[str, Any]], rules: Dict[str, Dict[str, Any]],
                    signer: Optional[FunctionSigner]) -> List[Dict[str, str]]:
+        self._sweep_flare_sessions(infos, rules)
         workers = min(self._concurrency, len(infos))
         if workers <= 1:
             return [self._sign_one(info, rules, signer) for info in infos]

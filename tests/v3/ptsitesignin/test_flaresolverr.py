@@ -448,3 +448,44 @@ def test_flare_service_address_priority():
     loli = core.resolve_rule({"url": "https://mua.xloli.cc"}, {})
     assert core.flare_service_address(loli, "https://fs-global/", "https://trawl/") \
         == "https://fs-global/"
+
+
+def test_sweep_destroys_only_plugin_sessions():
+    # 服务端同时有别人的会话与本插件残留（含字符串与对象两种返回形态）：
+    # 只销毁 ptsitesignin 创建的（ptsignin- 前缀），别的一个不碰。
+    from ptsitesignin.flaresolverr import sweep_stale_sessions
+    recorder = _Recorder(
+        {"status": "ok", "sessions": [
+            "other-tool-session",
+            "ptsignin-abc123",
+            {"session": "ptsignin-def456", "persistent": False},
+        ]},
+        {"status": "ok", "message": "The session has been removed."},
+        {"status": "ok", "message": "The session has been removed."},
+    )
+    with patch.object(FlareSolverrSigner, "_call", recorder):
+        removed = sweep_stale_sessions("https://flare.example/")
+    assert removed == 2
+    assert recorder.requests[0][0]["cmd"] == "sessions.list"
+    destroyed = [r[0].get("session") for r in recorder.requests[1:]]
+    assert destroyed == ["ptsignin-abc123", "ptsignin-def456"]
+
+
+def test_sweep_silent_when_service_unreachable():
+    # 服务僵死 / 断连：探测失败静默返回 0，绝不能在开跑前把整轮签到打断
+    from ptsitesignin.flaresolverr import sweep_stale_sessions
+
+    def hanging(payload, budget):
+        raise TimeoutError("wedged")
+
+    with patch.object(FlareSolverrSigner, "_call", hanging):
+        assert sweep_stale_sessions("https://flare.example/") == 0
+
+
+def test_sweep_auth_error_and_bad_address_cleanup_zero():
+    from ptsitesignin.flaresolverr import sweep_stale_sessions
+    recorder = _Recorder({"status": "error", "message": "401 未授权：服务端 Basic Auth 拒绝"})
+    with patch.object(FlareSolverrSigner, "_call", recorder):
+        assert sweep_stale_sessions("https://flare.example/") == 0
+    assert recorder.requests[0][0]["cmd"] == "sessions.list"  # 401 后绝不重试
+    assert sweep_stale_sessions("not-a-url") == 0

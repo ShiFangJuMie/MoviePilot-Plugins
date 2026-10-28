@@ -413,3 +413,43 @@ class FlareSolverrSigner:
     @classmethod
     def _note(cls, notes: list, started: float) -> str:
         return "；" + cls._suffix(notes, started)
+
+
+# 本插件创建的会话名统一前缀（sign() 里 "ptsignin-" + uuid），清理时只认它
+SESSION_PREFIX = "ptsignin-"
+
+
+def sweep_stale_sessions(address: str, auth: str = "", budget: int = 10,
+                         logger: Any = None) -> int:
+    """开跑前清理服务端残留的本插件会话，返回清理数量。
+
+    签到超时中断时 sessions.destroy 排在服务端卡死的浏览器操作后面永远
+    执行不到，会话与其浏览器进程便留在服务端累积。这里对健康的服务补上
+    清理；服务不可达或僵死时静默放弃（最多耗时 budget+20 秒），不影响
+    后续站点照常按各自逻辑执行与报错。
+    """
+    try:
+        client = FlareSolverrSigner(address, auth=auth)
+    except ValueError:
+        return 0
+    try:
+        listed = client._call({"cmd": "sessions.list"}, budget)
+    except Exception:
+        return 0
+    names = []
+    # 官方 FlareSolverr 3.x 返回会话名列表；部分兼容实现返回带 proxy 等
+    # 字段的对象列表——两种形态都认。
+    for item in (listed.get("sessions") or []) if isinstance(listed, Mapping) else []:
+        if isinstance(item, str):
+            names.append(item)
+        elif isinstance(item, Mapping):
+            names.append(str(item.get("session") or ""))
+    stale = [name for name in names if name.startswith(SESSION_PREFIX)]
+    for name in stale:
+        try:
+            client._call({"cmd": "sessions.destroy", "session": name}, budget)
+        except Exception:
+            pass
+    if stale and logger is not None:
+        logger.info("PT站点签到：清理 %d 个残留签到会话（%s）", len(stale), client.endpoint)
+    return len(stale)
