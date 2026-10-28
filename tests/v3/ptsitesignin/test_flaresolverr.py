@@ -93,9 +93,10 @@ def test_mua_preset_uses_flaresolverr_engine():
     audiences = core.resolve_rule({"url": "https://audiences.me/"}, {})
     assert audiences["engine"] == "flaresolverr"
     assert audiences["path"] == "/attendance.php"
-    # 观众的组件只认 TRAWL（Camoufox）指纹：私有服务地址不入库（敏感信息），
-    # 预设留空，由自定义规则给该站配 flare_url 指向 TRAWL 兼容服务
-    assert audiences["flare_url"] == ""
+    # 观众的组件只认 TRAWL（Camoufox）指纹：预设只声明 flare_backend=trawl，
+    # 服务地址来自插件设置的「TRAWL 地址」（私有部署域名不入库）
+    assert audiences["flare_backend"] == "trawl"
+    assert not audiences.get("flare_url")
     ourbits = core.resolve_rule({"url": "https://ourbits.club/"}, {})
     assert ourbits["engine"] == "flaresolverr"
     assert ourbits["path"] == "/attendance.php"
@@ -430,3 +431,20 @@ def test_callback_fallback_posts_token_when_site_did_not_submit():
     assert fields["cf-turnstile-response"] == "fixture-token"
     assert fields["userId"] == "60532"
     assert post["url"] == "https://mua.example/attendance.php"
+
+
+def test_flare_service_address_priority():
+    # 规则 flare_url 手工覆盖 > 站点声明的 backend 对应配置 > 全局 FlareSolverr
+    trawl_site = core.resolve_rule({"url": "https://audiences.me"}, {})
+    assert core.flare_service_address(trawl_site, "https://fs-global/", "https://trawl/") \
+        == "https://trawl/"
+    # TRAWL 未配置：退回全局（观众会被该站拒绝，但地址解析本身不报错）
+    assert core.flare_service_address(trawl_site, "https://fs-global/", "") == "https://fs-global/"
+    # 规则显式 flare_url 一律最优先
+    override = dict(trawl_site, flare_url="https://mine/")
+    assert core.flare_service_address(override, "https://fs-global/", "https://trawl/") \
+        == "https://mine/"
+    # 未声明 backend 的普通站直接用全局
+    loli = core.resolve_rule({"url": "https://mua.xloli.cc"}, {})
+    assert core.flare_service_address(loli, "https://fs-global/", "https://trawl/") \
+        == "https://fs-global/"

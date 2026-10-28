@@ -59,6 +59,7 @@ from .core import (
     account_from_site,
     account_ready,
     fallback_rule,
+    flare_service_address,
     DEFAULT_INDEX_PATH,
     decode_entities,
     discover_signin_target,
@@ -204,6 +205,7 @@ class PTSiteSignIn(_PluginBase):
     _browserless_timeout = 120
     _flaresolverr_url = ""
     _flare_auth = ""
+    _trawl_url = ""
     _cloak_url = ""
     _cloak_proxy = ""
     _ocr_url = ""
@@ -249,6 +251,7 @@ class PTSiteSignIn(_PluginBase):
         self._browserless_timeout = max(15, min(int(config.get("browserless_timeout") or 120), 300))
         self._flaresolverr_url = str(config.get("flaresolverr_url") or "").strip()
         self._flare_auth = str(config.get("flare_auth") or "").strip()
+        self._trawl_url = str(config.get("trawl_url") or "").strip()
         self._cloak_url = str(config.get("cloak_url") or "").strip()
         self._cloak_proxy = str(config.get("cloak_proxy") or "").strip()
         self._ocr_url = str(config.get("ocr_url") or "").strip()
@@ -327,6 +330,7 @@ class PTSiteSignIn(_PluginBase):
             "browserless_timeout": self._browserless_timeout,
             "flaresolverr_url": self._flaresolverr_url,
             "flare_auth": self._flare_auth,
+            "trawl_url": self._trawl_url,
             "cloak_url": self._cloak_url,
             "cloak_proxy": self._cloak_proxy,
             "ocr_url": self._ocr_url,
@@ -507,6 +511,11 @@ class PTSiteSignIn(_PluginBase):
                       type="password", placeholder="user:password",
                       hint="FlareSolverr / TRAWL / CloakBrowser 挂在 nginx Basic Auth 后面时填写；"
                            "对所有 FlareSolverr 兼容端点与 CloakBrowser 端点生效，401 立即报错不重试",
+                      **{"persistent-hint": True}),
+                field("VTextField", "trawl_url", "TRAWL 地址（可选，观众用）", 6,
+                      placeholder="https://trawl.example.com",
+                      hint="观众（audiences）的组件只认 TRAWL（Camoufox）指纹：在此填你的 TRAWL"
+                           "（FlareSolverr 兼容 /v1）服务地址；留空时观众退回全局 FlareSolverr（会被该站拒绝）",
                       **{"persistent-hint": True}),
                 field("VTextField", "cloak_url", "CloakBrowser 地址（可选，猪猪用）", 6,
                       placeholder="https://cloak.example.com",
@@ -797,7 +806,8 @@ class PTSiteSignIn(_PluginBase):
                     # （如 audiences 走 TRAWL 的 Camoufox 路线）。三个浏览器服务
                     # 都挂在同一套 nginx Basic Auth 后面：flare_auth 配置
                     # "user:pass" 后对所有 FlareSolverr 兼容端点生效。
-                    flare = FlareSolverrSigner(str(rule.get("flare_url") or self._flaresolverr_url),
+                    flare = FlareSolverrSigner(flare_service_address(rule, self._flaresolverr_url,
+                                                                    self._trawl_url),
                                                self._browserless_timeout,
                                                proxy=str(rule.get("flare_proxy") or ""),
                                                auth=self._flare_auth)

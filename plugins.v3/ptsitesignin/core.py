@@ -514,9 +514,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # Browserless 也被 600010 拒绝；TRAWL（Camoufox 反检测 Firefox，FlareSolverr
         # 兼容 /v1）2026-10-27 实测通过：solveEmbeddedCaptchas 解内嵌组件 → 回调提交。
         # 萝莉 / OurBits 继续走全局配置的原生 FlareSolverr。
-        # 服务地址不入库（私有部署域名属于敏感信息）：在自定义规则里给本站配
-        # {"flare_url":"https://<你的 TRAWL 地址>/"} 指向 FlareSolverr 兼容服务。
-        "flare_url": "",
+        # 本站声明走 TRAWL 型兼容服务（flare_backend）；具体地址在插件设置的
+        # 「TRAWL 地址」里配置——私有部署域名不入库。规则里的 flare_url 仍可覆盖。
+        "flare_backend": "trawl",
         # Tab 次数由签到页 HTML 按焦点序自动推算（2026-10-26 已用真实浏览器
         # Tab 游走核对：推算 50 = 实测 50，无需钉值）。页面改版导致偏差时，用
         # scripts/ptsitesignin_tabwalk.mjs 校准后以 flare_tabs 钉住。
@@ -698,6 +698,25 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
 
 # 挑战类型 → Browserless 签到方式
 FALLBACK_MODES = {"cloudflare": "cloudflare", "captcha": "image"}
+
+
+def flare_service_address(rule: Mapping[str, Any], flaresolverr_url: str,
+                          trawl_url: str = "") -> str:
+    """站点最终使用的 FlareSolverr 兼容端点。
+
+    优先级：规则里的 flare_url（手工覆盖）> 站点声明的 flare_backend 对应的
+    后台配置（如观众声明 trawl，用插件设置的「TRAWL 地址」）> 全局 FlareSolverr。
+    私有部署的服务地址只存在配置里，不写进预设。
+    """
+    override = str(rule.get("flare_url") or "").strip()
+    if override:
+        return override
+    if str(rule.get("flare_backend") or "").strip() == "trawl":
+        configured = str(trawl_url or "").strip()
+        if configured:
+            return configured
+        # TRAWL 未配置：退回全局（该站会被组件拒绝，但地址解析本身不报错）
+    return str(flaresolverr_url or "").strip()
 
 
 def fallback_rule(rule: Mapping[str, Any], challenge: str) -> Dict[str, Any]:
