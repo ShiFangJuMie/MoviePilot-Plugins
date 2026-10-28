@@ -3,25 +3,28 @@
 
 依赖：playwright（MoviePilot 自带；独立使用时 pip install playwright，无需下载本地浏览器）。
 
+前置条件（2026-10-28 实测定论）：猪猪的 web 会话按**精确出口 IP**校验——
+用户 Edge 走家宽 IPv4，而家庭 Clash 对 piggo.me（CF 有 AAAA 记录）默认拨 IPv6，
+出口 IP 不一致 → 应用层 302 回登录页（Cloudflare 与雷池两层都放行也没用）。
+要走本路线，必须先让家宽 Clash 对 piggo.me 拨 IPv4（direct 出站 ip-version: ipv4，
+或 hosts 把 piggo.me 固定到 A 记录），可用 https://piggo.me/cdn-cgi/trace 验证
+（ip= 应为家宽 IPv4，而不是 240e: 开头）。插件内猪猪预设走本机 Playwright 引擎，
+本脚本只是远程 CloakBrowser 路线的联调客户端。
+
 关键设计：
-- 稳定 fingerprint seed（默认 piggo-prod）：猪猪的会话深绑登录时浏览器的指纹，
-  而 CloakBrowser 的指纹由 seed 决定——同一 seed 每次运行才是"同一个浏览器"，
-  登录一次后会话即可长期复用（Cookie 罐持久化在本地）。
 - Cookie 罐（默认 /tmp/piggo_cloak_cookies.txt）优先于 PTSIGNIN_COOKIE；
   每次运行结束自动保存最新 Cookie。
-- 首次使用或会话失效时：设置 PIGGO_USER / PIGGO_PASS 环境变量（或 --login），
-  客户端会在登录页自动填表提交（表单无图片验证码；若账号开了两步验证，
-  再设 PIGGO_2FA=动态码）。注意站点规则：连续 10 次登录失败会封 IP。
+- 登录页只报告、不代填：在 CloakBrowser 内登录猪猪的路线已被否决，
+  本客户端不再提供自动登录（PIGGO_USER / PIGGO_PASS / --login 已移除）。
 
 用法：
     CLOAK_ENDPOINT=https://https://<REDACTED-INSTANCE> CLOAK_AUTH='user:pass' \
-    PIGGO_USER='...' PIGGO_PASS='...' \
-    python3 scripts/ptsitesignin_cloak.py --login      # 首次：登录 + 签到 + 存 Cookie
-    # 之后每天：
-    CLOAK_ENDPOINT=... CLOAK_AUTH=... python3 scripts/ptsitesignin_cloak.py
+    CLOAK_PROXY=http://<REDACTED-PROXY>:<PORT> \
+    PTSIGNIN_COOKIE='sl-challenge-server=...; cf_clearance=...; pigo_np_web_session=...; sl-session=...' \
+    python3 scripts/ptsitesignin_cloak.py
 
-环境变量：CLOAK_ENDPOINT / CLOAK_AUTH 必填；CLOAK_SEED（默认 piggo-prod）、
-CLOAK_PROXY、CLOAK_COOKIE_JAR、PIGGO_USER / PIGGO_PASS / PIGGO_2FA 可选。
+环境变量：CLOAK_ENDPOINT / CLOAK_AUTH / PTSIGNIN_COOKIE 必填；
+CLOAK_SEED、CLOAK_PROXY、CLOAK_UA、CLOAK_COOKIE_JAR、CLOAK_DUMP 可选。
 退出码：0 成功/已签，1 失败，2 配置缺失。
 """
 import base64
@@ -37,7 +40,6 @@ SUCCESS_WORDS = ("签到成功", "簽到成功", "成功签到", "打卡成功",
 ALREADY_WORDS = ("今日已签", "今天已签", "已经签到", "已签到", "已簽到", "明日")
 BLOCK_WORDS = ("正在被调试", "正在被調試")
 SAFELINE_CONFIRM = ("#sl-check", "#slg-box button", "div[id^='slg'] button")
-LOGIN_MARK = ("必须登录", "猪猪 :: 登录")
 TIMEOUT_SECONDS = 90
 JAR = os.environ.get("CLOAK_COOKIE_JAR", "/tmp/piggo_cloak_cookies.txt")
 # CF 的 cf_clearance 绑 IP+UA：借 Edge 的通行证（或后续自己的）需要一致的 UA 串
@@ -111,26 +113,6 @@ def judge(text: str):
     return "", ""
 
 
-def try_login(page, site: str, path: str) -> bool:
-    """在登录页自动填表提交。返回是否仍需继续等待结果。"""
-    user = os.environ.get("PIGGO_USER", "").strip()
-    password = os.environ.get("PIGGO_PASS", "").strip()
-    if not (user and password):
-        return False
-    try:
-        page.fill("input[name='username']", user, timeout=8000)
-        page.fill("input[name='password']", password, timeout=8000)
-        code = os.environ.get("PIGGO_2FA", "").strip()
-        if code:
-            page.fill("input[name='two_step_code']", code, timeout=8000)
-        page.click("input[type='button'][value='登录']", timeout=8000)
-        page.wait_for_timeout(6000)
-        return True
-    except Exception as error:
-        print(f"登录填表未完成：{type(error).__name__}", file=sys.stderr)
-        return False
-
-
 def main() -> int:
     _watchdog()
     site = flag("--site") or "piggo.me"
@@ -138,10 +120,12 @@ def main() -> int:
     endpoint = (os.environ.get("CLOAK_ENDPOINT") or "").strip().rstrip("/")
     auth = (os.environ.get("CLOAK_AUTH") or "").strip()
     cookie, source = load_cookie_source()
-    force_login = "--login" in sys.argv
-    if not endpoint or (not cookie and not (force_login and os.environ.get("PIGGO_PASS"))):
-        print("需要 CLOAK_ENDPOINT 与 Cookie（或 --login + PIGGO_USER/PIGGO_PASS）",
+    if "--login" in sys.argv:
+        print("结果：failed（--login 已移除：CloakBrowser 内登录猪猪的路线已被否决）",
               file=sys.stderr)
+        return 2
+    if not endpoint or not cookie:
+        print("需要 CLOAK_ENDPOINT 与 Cookie（PTSIGNIN_COOKIE 或 Cookie 罐）", file=sys.stderr)
         return 2
 
     headers = {}
@@ -192,18 +176,8 @@ def main() -> int:
             if cookie:
                 context.add_cookies(parse_cookies(cookie, site))
             page.goto(f"https://{site}{path}", wait_until="domcontentloaded", timeout=120000)
-            # 登录页 + 有凭据 → 自动登录一次（会话即属于这个浏览器）
-            title = page.title() or ""
-            if force_login or any(mark in title for mark in LOGIN_MARK) or True:
-                text_probe = ""
-                try:
-                    text_probe = page.evaluate("document.body ? document.body.innerText : ''") or ""
-                except Exception:
-                    pass
-                if "必须登录" in text_probe or "猪猪 :: 登录" in title:
-                    if try_login(page, site, path):
-                        print("已提交登录表单，等待会话生效…")
-            # 雷池检测页自己的 JS 跑若干秒；确认按钮出现就点；签到页自动完成签到
+            # 雷池检测页自己的 JS 跑若干秒；确认按钮出现就点；签到页自动完成签到。
+            # （停在登录页 = 出口 IP 与会话不符：查上面的 IPv4 前置条件。）
             clicked = 0
             for _ in range(TIMEOUT_SECONDS // 2):
                 page.wait_for_timeout(2000)

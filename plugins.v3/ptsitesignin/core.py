@@ -251,18 +251,23 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         "success_keywords": ["签到成功", "簽到成功", "签到完成", "已签到", "本次签到"],
         "already_keywords": ["今日已签到", "今天已签到", "已签到", "已簽到", "已领取"],
     },
-    # ---- Piggo（piggo.me）：自建浏览器打开首页，点击「签到」并等待云盾 / 雷池放行 ----
+    # ---- Piggo（piggo.me）：本机 Playwright（家宽出口与登录浏览器同 IPv4）----
+    # 2026-10-28 判别定论：猪猪的 web 会话（pigo_np_web_session）按**精确出口 IP**校验——
+    # 用户的 Edge 走家宽 IPv4（<REDACTED-HOME-IP>），会话绑在该地址上；经家庭 Clash 代理的
+    # 远程浏览器对 piggo.me（CF 有 AAAA）会拨 IPv6（240e:...），IP 不一致 → 应用层 302
+    # 回登录页（CF 与雷池两层均放行也不行）。上游对猪猪用本机 Playwright 正是因为
+    # 本机出口 = 家宽 v4 = Edge 同款 IP（其"异地登录"对机房 IP 也另有限制）。
+    # 因此本插件把猪猪预设对齐上游：engine=playwright + cookie_mode=browser。
+    # 若要走远程浏览器（如 CloakBrowser），须先让家宽 Clash 对 piggo.me 拨 IPv4
+    # （direct 出站 ip-version: ipv4 或 hosts 固定 A 记录），使出口回到 <REDACTED-HOME-IP>。
     "piggo.me": {
-        # Function 在自建实例中保留账号 Cookie 和验证中新下发的 cf_clearance / sl_*；
-        # 出口由该实例或配置的浏览器代理决定，需符合站点的异地登录校验。
-        "engine": "function",
-        "mode": "cloudflare",
-        # 用户显式切回 Playwright 时仍使用浏览器 Cookie 存储。
+        "engine": "playwright",
         "cookie_mode": "browser",
         "method": "GET",
-        # Function 在点击签到前后按这个预算轮询验证状态。
-        "cloudflare_wait": 60,
-        "path": "/index.php",
+        # 云盾 / 雷池检测页多等一会儿（Playwright 引擎按这个预算轮询放行）
+        "cloudflare_wait": 40,
+        "path": "/attendance.php",
+        "retry_paths": ["/index.php"],
         "submit_method": "dom_click",
         "submit_selector": "a, input[type='submit'], button, [role='button'], span",
         "submit_text": "签到",
@@ -650,6 +655,10 @@ def validate_rule(rule: Mapping[str, Any]) -> Dict[str, Any]:
         signin_path = str(result.get("signin_path") or "")
         if signin_path and (not signin_path.startswith("/") or signin_path.startswith("//")):
             raise ValueError("第二段签到地址必须是以 / 开头的站内路径")
+        for retry_path in list(result.get("retry_paths") or []):
+            item = str(retry_path or "")
+            if item and (not item.startswith("/") or item.startswith("//")):
+                raise ValueError("retry_paths 里的每个页面都必须是以 / 开头的站内路径")
         patterns = result.get("signin_token_patterns")
         if patterns is not None and not isinstance(patterns, Mapping):
             raise ValueError("signin_token_patterns 必须是 {字段: 正则} 形式的对象")
@@ -1302,6 +1311,35 @@ _PAGE_CLICK_JS = """
 }
 """
 
+# 两段式点击的第一步：只「标记 + 滚动到位」，真正的点击交给 page.click（真实鼠标事件，
+# 抬不起 hover/冒泡的站点点得更像人）；真实点击被遮罩挡住时再退回 _PAGE_CLICK_JS 的 JS 点击。
+_MARK_CLICK_JS = """
+(args) => {
+  const [selector, text] = args;
+  const nodes = Array.from(document.querySelectorAll(
+    selector || "input[type='submit'], button, a, [role='button']"));
+  const wanted = (text || "").trim();
+  const hits = nodes.filter((node) => {
+    if (node.disabled) return false;
+    const label = ((node.value || node.textContent || "") + " " + (node.getAttribute("aria-label") || "")
+                   + " " + (node.getAttribute("title") || "")).trim();
+    const visible = node.offsetParent !== null || node.getClientRects().length > 0;
+    return visible && (!wanted || label.includes(wanted));
+  });
+  if (!hits.length) return false;
+  hits.sort((left, right) => {
+    const a = (left.value || left.textContent || "").trim();
+    const b = (right.value || right.textContent || "").trim();
+    return Number(b === wanted) - Number(a === wanted) || a.length - b.length;
+  });
+  hits[0].setAttribute("data-ptsignin-target", "1");
+  hits[0].scrollIntoView({block: "center"});
+  return true;
+}
+"""
+
+_CLICK_MARKED_SELECTOR = '[data-ptsignin-target="1"]'
+
 
 _CHALLENGE_PATTERN = re.compile(r"(just a moment|cf-chl|_cf_chl_opt|chl_page|"
                                 r"正在进行安全检测|安全检测能力由|雷池\s*WAF|SafeLine|"
@@ -1408,6 +1446,22 @@ def cookie_list_for_context(cookie: str, url: str) -> List[Dict[str, Any]]:
     return items
 
 
+def playwright_paths(rule: Mapping[str, Any]) -> List[str]:
+    """本机浏览器要依次尝试的页面：主 path 在前，retry_paths 依次兜底。
+
+    有的站点（猪猪）首页只有「[签到已得…]」链接，真正的签到表单在 attendance.php，
+    所以允许规则再给几个备用页面，找不到按钮就换下一个。
+    """
+    paths: List[str] = []
+    primary = str(rule.get("path") or DEFAULT_HTTP_PATH).strip()
+    candidates = [primary] + list(rule.get("retry_paths") or [])
+    for value in candidates:
+        item = str(value or "").strip()
+        if item and item not in paths:
+            paths.append(item)
+    return paths or [DEFAULT_HTTP_PATH]
+
+
 def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: int = 90,
                     proxies: Optional[Dict[str, str]] = None) -> Optional[SignResult]:
     """用本机浏览器签到：打开页面 → 预检已签到 → 按文字点按钮 → 读结果判定。
@@ -1426,7 +1480,7 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
     cookie = str(site.get("cookie") or "").strip()
     if not base_url:
         return None
-    url = target_url(base_url, str(rule.get("path") or DEFAULT_HTTP_PATH))
+    paths = playwright_paths(rule)
     selector = str(rule.get("submit_selector") or "")
     submit_text = str(rule.get("submit_text") or "")
     wait_ms = int(rule.get("wait") or 4000)
@@ -1455,38 +1509,97 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         # MoviePilot 的 action() 里是 page.goto(url) 等 load：Cloudflare/雷池盾页永远等不到
         # load，30 秒必超时（日志里的 Page.goto: Timeout 30000ms 就是这个）。所以让它先打开
         # about:blank，真正的导航放在这里，只等 domcontentloaded，再自己轮询盾页是否放行。
-        try:
-            page.goto(url, wait_until="domcontentloaded",
-                      timeout=max(15000, int(timeout * 1000)))
-        except Exception:
-            pass
-        try:
-            page.wait_for_load_state("domcontentloaded")
-        except Exception:
-            pass
-        before = _wait_challenge_clear(page, challenge_budget)
-        after = before
-        clicked = False
-        until = time.monotonic() + min(timeout, max(1, int(rule.get("button_wait") or 15000) / 1000))
-        # DOMContentLoaded can precede a SPA's authenticated API response and button rendering.
-        while time.monotonic() < until:
-            after = page.content() or ""
-            if login_page(after):
-                return {"before": before, "after": after, "clicked": False, "login": True}
-            if classify(after, rule).status in {"success", "already"}:
-                break
-            if _page_has_challenge(after):
-                after = _wait_challenge_clear(page, challenge_budget)
-                if _page_has_challenge(after):
-                    return {"before": before, "after": after, "clicked": False, "challenge": True}
+        tried: List[str] = []
+        last: Dict[str, Any] = {}
+        for path in paths:
+            url = target_url(base_url, path)
+            tried.append(path)
+            try:
+                page.goto(url, wait_until="domcontentloaded",
+                          timeout=max(15000, int(timeout * 1000)))
+            except Exception:
+                pass
+            try:
+                page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                pass
+            before = _wait_challenge_clear(page, challenge_budget)
+            after = before
+            clicked = False
+            stuck = ""
+            judged_before = classify(before, rule)
+            if before and _page_has_challenge(before):
+                # 还停在雷池 / Cloudflare 检测页：这时候页面上根本没有签到按钮，
+                # 直接去点只会得到「没找到按钮」的误导性结论，换下一个备用页面。
+                last = {"before": before, "after": before, "clicked": False,
+                        "path": path, "stuck": "challenge"}
                 continue
-            clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
-            if clicked:
-                page.wait_for_timeout(max(1000, wait_ms))
-                after = _wait_challenge_clear(page, challenge_budget)
+            if judged_before.status == "failed" and "二级验证" in str(judged_before.message or ""):
+                # 异地登录验证页：需要人工/2FA，点按钮没用
+                return {"before": before, "after": before, "clicked": False,
+                        "path": path, "stuck": "second_factor",
+                        "message": judged_before.message}
+            if judged_before.status not in {"success", "already"}:
+                until = time.monotonic() + min(
+                    timeout, max(1, int(rule.get("button_wait") or 15000) / 1000))
+                # DOMContentLoaded can precede a SPA's authenticated API response and button rendering.
+                while time.monotonic() < until:
+                    after = page.content() or ""
+                    if login_page(after):
+                        last = {"before": before, "after": after, "clicked": False,
+                                "path": path, "login": True}
+                        break
+                    if classify(after, rule).status in {"success", "already"}:
+                        break
+                    if _page_has_challenge(after):
+                        after = _wait_challenge_clear(page, challenge_budget)
+                        if _page_has_challenge(after):
+                            stuck = "challenge"
+                            break
+                        continue
+                    # 两段式点击：先标记，再用真实鼠标事件点（被遮罩挡住时退回 JS 点击）
+                    try:
+                        marked = bool(page.evaluate(_MARK_CLICK_JS, [selector, submit_text]))
+                    except Exception:
+                        marked = False
+                    if not marked:
+                        page.wait_for_timeout(250)
+                        continue
+                    try:
+                        page.click(_CLICK_MARKED_SELECTOR, timeout=10000)
+                        clicked = True
+                    except Exception:
+                        try:
+                            clicked = bool(page.evaluate(_PAGE_CLICK_JS, [selector, submit_text]))
+                        except Exception:
+                            clicked = False
+                    try:
+                        page.wait_for_timeout(max(1000, wait_ms))
+                    except Exception:
+                        pass
+                    # 点完签到可能被踢到雷池 / Cloudflare 检测页，再等一次放行
+                    after = _wait_challenge_clear(page, challenge_budget)
+                    if classify(after, rule).status in {"success", "already"}:
+                        break
+                    if after and _page_has_challenge(after):
+                        stuck = "challenge"
+                        break
+            else:
+                after = before
+                try:
+                    after = page.content() or after
+                except Exception:
+                    pass
+            last = {"before": before, "after": after, "clicked": clicked,
+                    "path": path, "stuck": stuck}
+            if last.get("login"):
                 break
-            page.wait_for_timeout(250)
-        return {"before": before, "after": after, "clicked": clicked}
+            if clicked or stuck == "challenge" or classify(after, rule).status in {"success", "already"}:
+                break
+            # 这一页既没点成也不像已签到：换下一个备用页面
+        last["tried"] = tried
+        last["paths"] = paths
+        return last
 
     try:
         outcome = PlaywrightHelper().action(url="about:blank", callback=callback,
@@ -1501,16 +1614,24 @@ def playwright_sign(site: Mapping[str, Any], rule: Mapping[str, Any], timeout: i
         return SignResult("failed", "本地浏览器没拿到页面（检查 MoviePilot 的浏览器依赖）")
 
     after = str(outcome.get("after") or "")
+    tried = "、".join(str(item) for item in (outcome.get("tried") or []))
     if outcome.get("login") or login_page(after):
         return SignResult("failed", login_required_message("签到页跳转到了登录页"))
-    if outcome.get("challenge") or cloudflare_pending(after):
-        return SignResult("failed", "本机浏览器未通过 Cloudflare / WAF 验证")
+    if outcome.get("stuck") == "second_factor":
+        return SignResult("failed", str(outcome.get("message")
+                                        or "站点要求二级验证（异地登录验证）"))
+    if outcome.get("challenge") or outcome.get("stuck") == "challenge" or cloudflare_pending(after):
+        return SignResult("failed",
+                          f"本机浏览器未通过 Cloudflare / WAF 验证（已试：{tried or '默认页面'}）："
+                          f"检查 Cookie 里是否带 cf_clearance / sl_*，或把 cloudflare_wait 调大")
     judged = classify(after, rule)
     if judged.status in {"success", "already"}:
         prefix = "" if outcome.get("clicked") else "（页面已是签到完成状态）"
         return SignResult(judged.status, f"{judged.message}{prefix}")
     if not outcome.get("clicked"):
-        return SignResult("failed", "本地浏览器没找到可点的签到按钮")
+        return SignResult("failed",
+                          f"本地浏览器没找到可点的签到按钮（已试：{tried or '默认页面'}；"
+                          f"可在这条规则的 retry_paths 里补页面）")
     return judged
 
 

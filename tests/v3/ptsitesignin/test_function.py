@@ -208,6 +208,27 @@ def test_self_hosted_configuration_round_trips_and_is_exposed_in_form():
         plugin.stop_service()
 
 
+def test_piggo_preset_uses_local_browser_with_cookie_jar_and_retry_paths():
+    # 猪猪会话按精确出口 IP 校验：预设必须走本机 Playwright（家宽出口与登录浏览器同源），
+    # Cookie 写入浏览器存储（验证中下发的新 Cookie 能随后续请求发出），并带备用页面。
+    rule = core.resolve_rule({"url": "https://piggo.me"}, {})
+    assert rule["engine"] == "playwright"
+    assert rule["cookie_mode"] == "browser"
+    assert rule["path"] == "/attendance.php"
+    assert "/index.php" in list(rule.get("retry_paths") or [])
+    assert core.playwright_paths(rule)[0] == "/attendance.php"
+
+
+def test_retry_paths_must_be_site_internal():
+    import pytest
+    with pytest.raises(ValueError):
+        core.resolve_rule({"url": "https://piggo.me"},
+                          {"piggo.me": {"retry_paths": ["index.php"]}})
+    with pytest.raises(ValueError):
+        core.resolve_rule({"url": "https://piggo.me"},
+                          {"piggo.me": {"retry_paths": ["//evil.example"]}})
+
+
 def test_piggo_security_navigation_is_not_a_second_factor_challenge():
     rule = core.resolve_rule({"url": "https://piggo.me"}, {})
     page = '<body><a href="/usercp.php?action=security">两步验证</a><p>签到成功</p></body>'
@@ -294,7 +315,17 @@ def test_local_browser_waits_for_async_button_and_identifies_login():
             if clock[0] < 0.6:
                 return '<body>正在加载…</body>'
             return '<body><button>立即签到</button><footer>已签到 今天 可补签</footer></body>'
+        def click(self, selector, timeout=None):
+            # 两段式点击的第二段：真实鼠标点击被标记的控件
+            if "data-ptsignin-target" in selector:
+                self.submitted += 1
+                return True
+            return False
         def evaluate(self, *args):
+            script = str(args[0]) if args else ""
+            # 标记脚本只选中目标，不算提交；直接 JS 点击（兜底）才算一次提交
+            if "data-ptsignin-target" in script and "setAttribute" in script:
+                return not self.login and clock[0] >= 0.6
             if self.login or clock[0] < 0.6:
                 return False
             self.submitted += 1
