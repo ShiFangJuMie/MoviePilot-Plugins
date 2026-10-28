@@ -44,8 +44,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = REPO_ROOT / "plugins.v3" / "ptsitesignin"
-DEFAULT_FLARESOLVERR = "https://https://<REDACTED-INSTANCE>/"
-DEFAULT_BROWSERLESS = "https://https://<REDACTED-INSTANCE>/"
+DEFAULT_FLARESOLVERR = os.environ.get("PTSIGNIN_FLARESOLVERR", "")
+DEFAULT_BROWSERLESS = os.environ.get("PTSIGNIN_BROWSERLESS", "")
 DEFAULT_BQL_CLOUD = "https://production-sfo.browserless.io"
 # FlareSolverr 引擎预设没写 mode（表单/回调流不需要）；换 BQL 引擎时这些站按 Turnstile 求解流走
 BQL_CLOUDFLARE_HOSTS = {"mua.xloli.cc", "ourbits.club", "audiences.me"}
@@ -149,7 +149,7 @@ def main() -> int:
     parser.add_argument("--site", required=True, help="站点域名，如 mua.xloli.cc / piggo.me")
     parser.add_argument("--engine", choices=["http", "function", "flaresolverr", "bql", "fox", "module"],
                         help="覆盖引擎（默认按预设；有站点模块时先走模块，与插件一致）")
-    parser.add_argument("--fox-url", default="https://https://<REDACTED-INSTANCE>/",
+    parser.add_argument("--fox-url", default=os.environ.get("PTSIGNIN_FOX_URL", ""),
                         help="foxserve（VPS 上 Playwright+Camoufox 服务）根地址")
     parser.add_argument("--bql-url", default=DEFAULT_BQL_CLOUD,
                         help="Browserless Cloud 根地址（BQL 引擎）")

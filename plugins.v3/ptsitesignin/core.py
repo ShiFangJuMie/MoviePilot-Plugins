@@ -514,7 +514,9 @@ DEFAULT_RULES: Dict[str, Dict[str, Any]] = {
         # Browserless 也被 600010 拒绝；TRAWL（Camoufox 反检测 Firefox，FlareSolverr
         # 兼容 /v1）2026-10-27 实测通过：solveEmbeddedCaptchas 解内嵌组件 → 回调提交。
         # 萝莉 / OurBits 继续走全局配置的原生 FlareSolverr。
-        "flare_url": "https://https://<REDACTED-INSTANCE>/",
+        # 服务地址不入库（私有部署域名属于敏感信息）：在自定义规则里给本站配
+        # {"flare_url":"https://<你的 TRAWL 地址>/"} 指向 FlareSolverr 兼容服务。
+        "flare_url": "",
         # Tab 次数由签到页 HTML 按焦点序自动推算（2026-10-26 已用真实浏览器
         # Tab 游走核对：推算 50 = 实测 50，无需钉值）。页面改版导致偏差时，用
         # scripts/ptsitesignin_tabwalk.mjs 校准后以 flare_tabs 钉住。

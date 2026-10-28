@@ -93,8 +93,9 @@ def test_mua_preset_uses_flaresolverr_engine():
     audiences = core.resolve_rule({"url": "https://audiences.me/"}, {})
     assert audiences["engine"] == "flaresolverr"
     assert audiences["path"] == "/attendance.php"
-    # 观众的组件只认 TRAWL（Camoufox）指纹：预设专用 flare_url，其余站走全局配置
-    assert audiences["flare_url"] == "https://https://<REDACTED-INSTANCE>/"
+    # 观众的组件只认 TRAWL（Camoufox）指纹：私有服务地址不入库（敏感信息），
+    # 预设留空，由自定义规则给该站配 flare_url 指向 TRAWL 兼容服务
+    assert audiences["flare_url"] == ""
     ourbits = core.resolve_rule({"url": "https://ourbits.club/"}, {})
     assert ourbits["engine"] == "flaresolverr"
     assert ourbits["path"] == "/attendance.php"

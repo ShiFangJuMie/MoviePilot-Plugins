@@ -18,8 +18,8 @@
   本客户端不再提供自动登录（PIGGO_USER / PIGGO_PASS / --login 已移除）。
 
 用法：
-    CLOAK_ENDPOINT=https://https://<REDACTED-INSTANCE> CLOAK_AUTH='user:pass' \
-    CLOAK_PROXY=http://<REDACTED-PROXY>:<PORT> \
+    CLOAK_ENDPOINT=https://<cloakserve 地址> CLOAK_AUTH='user:pass' \
+    CLOAK_PROXY=http://<出口代理>:<端口> \
     PTSIGNIN_COOKIE='sl-challenge-server=...; cf_clearance=...; pigo_np_web_session=...; sl-session=...' \
     python3 scripts/ptsitesignin_cloak.py
 

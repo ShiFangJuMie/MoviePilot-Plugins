@@ -5,7 +5,7 @@
 #   2) CloakBrowser 免费 key 按 README 用 GitHub 登录领取，填到 CLOAKBROWSER_LICENSE_KEY
 #      （免费层即可：最新构建 + 1 并发，逐站顺序签到够用）
 #   3) docker compose up -d --build
-#   4) cloudflared 给 8100 加一条 ingress（例如 https://https://<REDACTED-INSTANCE>/）
+#   4) cloudflared 给 8100 加一条 ingress（例如 https://<你的隧道域名>/）
 services:
   cloakbrowser:
     image: cloakhq/cloakbrowser
