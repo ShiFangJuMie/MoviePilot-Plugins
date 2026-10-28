@@ -178,3 +178,33 @@ def test_cloak_sign_missing_endpoint():
     result = cloak_mod.cloak_sign(SITE, RULE, endpoint="")
     assert result.status == "failed"
     assert "未配置" in result.message
+
+
+def test_cloak_sign_clicks_submit_button(monkeypatch):
+    # Sunny 型站点：页面出现「立即签到」按钮 → 两段式点击 → 站点回调后变已签状态
+    unsigned = "<body><button>立即签到</button>今日 未签到</body>"
+    signed = "<body>今日已签到</body>"
+    page = ScriptedPage([unsigned])
+    browser = _install_fake_playwright(monkeypatch, page)
+    monkeypatch.setattr(cloak_mod, "discover_ws_url",
+                        lambda *a, **k: "ws://fake/devtools/browser/0")
+    monkeypatch.setattr(cloak_mod, "close_instance", lambda *a, **k: None)
+    rule = dict(RULE, submit_method="dom_click", submit_selector="button",
+                submit_text="立即签到")
+    clicks = []
+    state = {"clicked": False}
+
+    def fake_click(selector, timeout=None):
+        clicks.append(selector)
+        state["clicked"] = True
+        return True
+
+    page.click = fake_click
+    page.evaluate = lambda script, *a: ("data-ptsignin-target" in str(script)
+                                        and "setAttribute" in str(script))
+    page.content = lambda: signed if state["clicked"] else unsigned
+    result = cloak_mod.cloak_sign({"url": "https://piggo.me", "cookie": "a=b"}, rule,
+                                  timeout=60, endpoint="https://12730.example.com")
+    assert result.status == "already"
+    assert clicks, "必须发生真实点击（两段式第二步）"
+    assert all("data-ptsignin-target" in selector for selector in clicks)

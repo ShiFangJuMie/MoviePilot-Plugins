@@ -30,7 +30,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Mapping, Optional
 
-from .core import SignResult, classify, cookie_list_for_context, login_page
+from .core import (SignResult, _CLICK_MARKED_SELECTOR, _MARK_CLICK_JS, _PAGE_CLICK_JS,
+                   classify, cookie_list_for_context, login_page)
 
 # 会话按精确出口 IP 校验的站点，浏览器实例必须经家宽 v4 代理出网
 DEFAULT_CLOAK_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -43,6 +44,7 @@ SL_CHECK_CLICK_JS = """
   return false;
 }
 """
+CF_CHECKBOX_FRAME = "challenges.cloudflare.com"
 CHALLENGE_POLL_SECONDS = 3
 DISCOVERY_TIMEOUT = 30
 
@@ -146,6 +148,8 @@ def _attempt_once(sync_playwright, site: Mapping[str, Any], rule: Mapping[str, A
                 if logger:
                     logger.debug("PT站点签到：cloak goto 异常 %s", type(error).__name__)
             clicked = 0
+            submits = 0
+            turnstile = 0
             failures = 0
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -176,6 +180,31 @@ def _attempt_once(sync_playwright, site: Mapping[str, Any], rule: Mapping[str, A
                             continue
                     except Exception:
                         pass
+                # 站内签到按钮（submit_method=dom_click）：两段式点击——先标记再用真实
+                # 鼠标事件点（被遮罩挡住时退回 JS 点击）；点完继续轮询等站点回调/页面刷新
+                if submits < 3 and str(rule.get("submit_method") or "").lower() == "dom_click" \
+                        and str(rule.get("submit_text") or "").strip():
+                    try:
+                        args = [str(rule.get("submit_selector") or ""),
+                                str(rule.get("submit_text") or "").strip()]
+                        if page.evaluate(_MARK_CLICK_JS, args):
+                            try:
+                                page.click(_CLICK_MARKED_SELECTOR, timeout=10000)
+                                submits += 1
+                            except Exception:
+                                submits += 1 if page.evaluate(_PAGE_CLICK_JS, args) else 0
+                    except Exception:
+                        pass
+                # Cloudflare 勾选式验证（规则 turnstile_click）：iframe 里的复选框点一下
+                if turnstile < 3 and bool(rule.get("turnstile_click")):
+                    for frame in getattr(page, "frames", []) or []:
+                        if CF_CHECKBOX_FRAME in str(getattr(frame, "url", "") or ""):
+                            try:
+                                frame.locator("input[type='checkbox']").first.click(timeout=3000)
+                                turnstile += 1
+                            except Exception:
+                                pass
+                            break
             return SignResult("failed", f"CloakBrowser {timeout} 秒内未确认签到结果"
                                         "（多半停在 Cloudflare / 雷池验证页）")
         finally:
